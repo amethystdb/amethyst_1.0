@@ -4,8 +4,8 @@ import (
 	"amethyst/internal/adaptive"
 	"amethyst/internal/common"
 	"amethyst/internal/compaction"
-	"amethyst/internal/metadata"
 	"amethyst/internal/memtable"
+	"amethyst/internal/metadata"
 	"amethyst/internal/segmentfile"
 	"amethyst/internal/sparseindex"
 	"amethyst/internal/sstable/reader"
@@ -30,22 +30,22 @@ var (
 
 // Results structure for JSON output
 type Results struct {
-	Engine              string         `json:"engine"`
-	Workload            string         `json:"workload"`
-	NumKeys             int            `json:"num_keys"`
-	ValueSize           int            `json:"value_size"`
-	WriteAmplification  float64        `json:"write_amplification"`
-	ReadAmplification   float64        `json:"read_amplification"`
-	SpaceAmplification  float64        `json:"space_amplification"`
-	CompactionCount     int            `json:"compaction_count"`
-	TotalDurationSec    float64        `json:"total_duration_sec"`
-	LogicalBytes        int64          `json:"logical_bytes"`
-	PhysicalBytes       int64          `json:"physical_bytes"`
-	TotalReads          int64          `json:"total_reads"`
-	SegmentScans        int64          `json:"segment_scans"`
-	LiveDataBytes       int64          `json:"live_data_bytes"`
-	TotalDiskBytes      int64          `json:"total_disk_bytes"`
-	Phases              []PhaseResult  `json:"phases,omitempty"`
+	Engine             string        `json:"engine"`
+	Workload           string        `json:"workload"`
+	NumKeys            int           `json:"num_keys"`
+	ValueSize          int           `json:"value_size"`
+	WriteAmplification float64       `json:"write_amplification"`
+	ReadAmplification  float64       `json:"read_amplification"`
+	SpaceAmplification float64       `json:"space_amplification"`
+	CompactionCount    int           `json:"compaction_count"`
+	TotalDurationSec   float64       `json:"total_duration_sec"`
+	LogicalBytes       int64         `json:"logical_bytes"`
+	PhysicalBytes      int64         `json:"physical_bytes"`
+	TotalReads         int64         `json:"total_reads"`
+	SegmentScans       int64         `json:"segment_scans"`
+	LiveDataBytes      int64         `json:"live_data_bytes"`
+	TotalDiskBytes     int64         `json:"total_disk_bytes"`
+	Phases             []PhaseResult `json:"phases,omitempty"`
 }
 
 type PhaseResult struct {
@@ -73,8 +73,6 @@ func zipfian(n int, s float64) int {
 	}
 	return n - 1
 }
-
-
 
 func main() {
 	flag.Parse()
