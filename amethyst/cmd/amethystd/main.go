@@ -324,10 +324,11 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 	var phases []PhaseResult
 
-	// PHASE 1: Write
+	// PHASE 1: Write (multiple rounds to create overlapping segments)
 	fmt.Println("=== PHASE 1: Write ===")
 	phase1Start := time.Now()
 
+	// Round 1: Sequential write to populate all keys
 	for i := 0; i < numKeys; i++ {
 		key := fmt.Sprintf("key-%010d", i)
 		val := make([]byte, valueSize)
@@ -352,6 +353,32 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if i > 0 && i%100000 == 0 {
 			fmt.Printf("  Written: %d/%d (%.1f%%)\r", i, numKeys, float64(i)*100/float64(numKeys))
+		}
+	}
+
+	// Round 2: Random overwrites to create overlapping segments
+	// This simulates a real workload where updates hit existing keys
+	overwriteCount := numKeys / 2
+	for i := 0; i < overwriteCount; i++ {
+		key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
+		val := make([]byte, valueSize)
+		rand.Read(val)
+
+		w.LogPut(key, val)
+		mem.Put(key, val)
+		*logicalBytes += int64(len(key) + valueSize)
+		*userBytes += int64(len(key) + len(val))
+
+		liveKeysMutex.Lock()
+		liveKeys[key] = len(val)
+		liveKeysMutex.Unlock()
+
+		if mem.ShouldFlush() {
+			data := mem.Flush()
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			*physicalBytes += seg.Length
+			meta.RegisterSegment(seg)
+			w.Truncate()
 		}
 	}
 	fmt.Println()
@@ -390,16 +417,20 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		*totalReads++
 		segs := meta.GetSegmentsForKey(key)
+		phase2SegmentScans += int64(len(segs)) // RA = total candidate segments / total reads
+
+		// Debug: show segment counts for first 10 reads
+		if i < 10 {
+			fmt.Printf("  [DEBUG READ] Key=%s, Segments to check=%d\n", key, len(segs))
+		}
 
 		for _, seg := range segs {
-			phase2SegmentScans++ // count each actual SSTable access
 			_, ok := sstReader.Get(seg, key)
 			meta.UpdateStats(seg.ID, 1, 0)
 			if ok {
 				break
 			}
 		}
-		// If no segments matched, still counts as 0 scans for this read
 
 		if i > 0 && i%500000 == 0 {
 			currentRA := float64(phase2SegmentScans) / float64(*totalReads)
@@ -489,9 +520,14 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		phase4Reads++
 		*totalReads++
 		segs := meta.GetSegmentsForKey(key)
+		phase4SegmentScans += int64(len(segs))
+
+		// Debug: show segment counts for first 10 reads
+		if i < 10 {
+			fmt.Printf("  [DEBUG READ] Key=%s, Segments to check=%d\n", key, len(segs))
+		}
 
 		for _, seg := range segs {
-			phase4SegmentScans++
 			_, ok := sstReader.Get(seg, key)
 			meta.UpdateStats(seg.ID, 1, 0)
 			if ok {
@@ -636,9 +672,9 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		*totalReads++
 		segs := meta.GetSegmentsForKey(key)
+		*totalSegmentScans += int64(len(segs))
 
 		for _, seg := range segs {
-			*totalSegmentScans++
 			_, ok := sstReader.Get(seg, key)
 			meta.UpdateStats(seg.ID, 1, 0)
 			if ok {
@@ -732,9 +768,9 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			*totalReads++
 			segs := meta.GetSegmentsForKey(key)
+			*totalSegmentScans += int64(len(segs))
 
 			for _, seg := range segs {
-				*totalSegmentScans++
 				_, ok := sstReader.Get(seg, key)
 				meta.UpdateStats(seg.ID, 1, 0)
 				if ok {
@@ -815,9 +851,9 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			*totalReads++
 			segs := meta.GetSegmentsForKey(key)
+			*totalSegmentScans += int64(len(segs))
 
 			for _, seg := range segs {
-				*totalSegmentScans++
 				_, ok := sstReader.Get(seg, key)
 				meta.UpdateStats(seg.ID, 1, 0)
 				if ok {
@@ -942,9 +978,9 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			*totalReads++
 			segs := meta.GetSegmentsForKey(key)
+			*totalSegmentScans += int64(len(segs))
 
 			for _, seg := range segs {
-				*totalSegmentScans++
 				_, ok := sstReader.Get(seg, key)
 				meta.UpdateStats(seg.ID, 1, 0)
 				if ok {
@@ -1030,9 +1066,9 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		*totalReads++
 		segs := meta.GetSegmentsForKey(key)
+		*totalSegmentScans += int64(len(segs))
 
 		for _, seg := range segs {
-			*totalSegmentScans++
 			_, ok := sstReader.Get(seg, key)
 			meta.UpdateStats(seg.ID, 1, 0)
 			if ok {
