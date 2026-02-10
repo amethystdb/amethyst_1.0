@@ -43,6 +43,9 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 		for k, v := range data {
 			merged[k] = v
 		}
+
+		// Track that this segment is being rewritten
+		e.meta.UpdateStats(seg.ID, 0, 1)
 	}
 
 	keys := make([]string, 0, len(merged))

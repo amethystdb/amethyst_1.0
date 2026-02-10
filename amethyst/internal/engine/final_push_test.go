@@ -34,8 +34,8 @@ func (m *MockReader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {
 
 func TestFinal_EightToOneMerge(t *testing.T) {
 	meta := metadata.NewTracker()
-	ctrl := &MockController{NextStrategy: common.LEVELED}
-	director := compaction.NewDirector(meta, ctrl)
+	// ctrl := &MockController{NextStrategy: common.LEVELED}
+	director := compaction.NewDirector(meta, nil)
 
 	executor := compaction.NewExecutor(meta, &MockReader{}, &MockWriter{})
 
