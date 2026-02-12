@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -130,7 +131,7 @@ func main() {
 	var userBytes int64 = 0
 	var totalReads int64 = 0
 	var totalSegmentScans int64 = 0
-	compactionCount := 0
+	var compactionCount int64 = 0
 	var phases []PhaseResult
 
 	// Track unique live keys for space amplification
@@ -148,17 +149,33 @@ func main() {
 			select {
 			case <-ticker.C:
 				fmt.Printf("  [DEBUG] Checking for compaction...\n")
-				if plan := director.MaybePlan(); plan != nil {
+
+				// CRITICAL: Lock metadata before planning
+				plan := director.MaybePlan()
+
+				if plan != nil {
 					fmt.Printf("  [BG Compaction] %d segs → Strategy=%v, Reason=%s\n",
 						len(plan.Inputs), plan.OutputStrategy, plan.Reason)
 
-					newSeg, err := executor.Execute(plan)
-					if err == nil && newSeg != nil {
-						physicalBytes += newSeg.Length
-						compactionCount++
-						fmt.Printf("  [BG Compaction] COMPLETED: +%d bytes to physicalBytes\n", newSeg.Length)
-					} else if err != nil {
-						fmt.Printf("  [BG Compaction] ERROR: %v\n", err)
+					// CRITICAL: Validate inputs before execution
+					validInputs := true
+					for _, seg := range plan.Inputs {
+						if seg == nil || seg.IsObsolete() {
+							validInputs = false
+							fmt.Printf("  [BG Compaction] SKIPPED: Invalid or obsolete segment\n")
+							break
+						}
+					}
+
+					if validInputs {
+						newSeg, err := executor.Execute(plan)
+						if err == nil && newSeg != nil {
+							atomic.AddInt64(&physicalBytes, newSeg.Length)
+							atomic.AddInt64(&compactionCount, 1)
+							fmt.Printf("  [BG Compaction] COMPLETED: +%d bytes to physicalBytes\n", newSeg.Length)
+						} else if err != nil {
+							fmt.Printf("  [BG Compaction] ERROR: %v\n", err)
+						}
 					}
 				} else {
 					fmt.Printf("  [DEBUG] No compaction needed\n")
@@ -231,7 +248,7 @@ func main() {
 		ra = float64(totalSegmentScans) / float64(totalReads)
 	}
 
-	// Space amplification
+	// Space amplification - GET ACTUAL FILE SIZE
 	liveKeysMutex.RLock()
 	logicalDataSize := int64(0)
 	for key, valSize := range liveKeys {
@@ -239,11 +256,18 @@ func main() {
 	}
 	liveKeysMutex.RUnlock()
 
-	allSegs := meta.GetAllSegments()
+	// Get actual file size on disk
+	fileInfo, err := os.Stat("sstable.data")
 	physicalDiskSize := int64(0)
-	for _, seg := range allSegs {
-		if !seg.Obsolete {
-			physicalDiskSize += seg.Length
+	if err == nil {
+		physicalDiskSize = fileInfo.Size()
+	} else {
+		// Fallback to sum of segment sizes
+		allSegs := meta.GetAllSegments()
+		for _, seg := range allSegs {
+			if !seg.IsObsolete() {
+				physicalDiskSize += seg.Length
+			}
 		}
 	}
 
@@ -272,7 +296,7 @@ func main() {
 		WriteAmplification: wa,
 		ReadAmplification:  ra,
 		SpaceAmplification: sa,
-		CompactionCount:    compactionCount,
+		CompactionCount:    int(compactionCount),
 		TotalDurationSec:   totalDuration.Seconds(),
 		LogicalBytes:       logicalBytes,
 		PhysicalBytes:      physicalBytes,
@@ -291,7 +315,7 @@ func main() {
 	fmt.Printf("Write Amplification:  %.2f\n", wa)
 	fmt.Printf("Read Amplification:   %.2f\n", ra)
 	fmt.Printf("Space Amplification:  %.2f\n", sa)
-	fmt.Printf("Compaction Count:     %d\n", compactionCount)
+	fmt.Printf("Compaction Count:     %d\n", int(compactionCount))
 	fmt.Printf("Total Duration:       %.2fs\n", totalDuration.Seconds())
 	fmt.Printf("Throughput:           %.0f ops/sec\n",
 		float64(*numKeysFlag)/totalDuration.Seconds())
@@ -320,7 +344,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) []PhaseResult {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) []PhaseResult {
 
 	var phases []PhaseResult
 
@@ -346,7 +370,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -376,7 +400,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -387,7 +411,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -479,7 +503,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -494,7 +518,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -573,7 +597,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter,
 	director compaction.Director, executor compaction.Executor,
-	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes *int64, compactionCount *int,
+	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes *int64, compactionCount *int64,
 	liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
 
 	fmt.Println("=== PURE WRITE WORKLOAD ===")
@@ -595,7 +619,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -610,7 +634,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -693,7 +717,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
 
 	fmt.Println("=== MIXED WORKLOAD (50/50) ===")
 
@@ -716,7 +740,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -731,7 +755,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -758,7 +782,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			if mem.ShouldFlush() {
 				data := mem.Flush()
 				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-				*physicalBytes += seg.Length
+				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
 			}
@@ -789,8 +813,8 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
 		newSeg, _ := executor.Execute(plan)
-		*physicalBytes += newSeg.Length
-		*compactionCount++
+		atomic.AddInt64(physicalBytes, newSeg.Length)
+		atomic.AddInt64(compactionCount, 1)
 	}
 }
 
@@ -798,7 +822,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
 
 	fmt.Println("=== READ-HEAVY WORKLOAD (95% reads) ===")
 
@@ -821,7 +845,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -836,7 +860,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -878,7 +902,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			if mem.ShouldFlush() {
 				data := mem.Flush()
 				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-				*physicalBytes += seg.Length
+				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
 			}
@@ -894,8 +918,8 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
 		newSeg, _ := executor.Execute(plan)
-		*physicalBytes += newSeg.Length
-		*compactionCount++
+		atomic.AddInt64(physicalBytes, newSeg.Length)
+		atomic.AddInt64(compactionCount, 1)
 	}
 }
 
@@ -903,7 +927,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
 
 	fmt.Println("=== WRITE-HEAVY WORKLOAD (95% writes) ===")
 
@@ -926,7 +950,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -941,7 +965,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 
@@ -968,7 +992,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			if mem.ShouldFlush() {
 				data := mem.Flush()
 				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-				*physicalBytes += seg.Length
+				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
 			}
@@ -999,8 +1023,8 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
 		newSeg, _ := executor.Execute(plan)
-		*physicalBytes += newSeg.Length
-		*compactionCount++
+		atomic.AddInt64(physicalBytes, newSeg.Length)
+		atomic.AddInt64(compactionCount, 1)
 	}
 }
 
@@ -1008,7 +1032,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
 
 	fmt.Println("=== ZIPFIAN WORKLOAD (hot keys, s=1.5) ===")
 
@@ -1031,7 +1055,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		if mem.ShouldFlush() {
 			data := mem.Flush()
 			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-			*physicalBytes += seg.Length
+			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -1046,7 +1070,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
-		*physicalBytes += seg.Length
+		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
 

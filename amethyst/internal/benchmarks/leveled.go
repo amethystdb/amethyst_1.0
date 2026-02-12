@@ -21,7 +21,7 @@ func (c *StaticLeveledController) ShouldRewrite(meta *common.SegmentMeta) (bool,
 	}
 
 	//fragment check (overlap or read count-> here set to 10 can change)
-	if meta.OverlapCount > 0 || meta.ReadCount > 10 {
+	if meta.OverlapCount > 0 || meta.GetReadCount() > 10 {
 		//returns true, specifies leveled
 		return true, common.LEVELED, "Baseline: Static Leveled merge"
 	}

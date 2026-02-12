@@ -3,6 +3,7 @@ package adaptive
 import (
 	"amethyst/internal/common"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,7 @@ type Controller interface {
 type FSMController struct {
 	segmentHistory map[string][]MetricSnapshot
 	lastSwitch     time.Time
+	mu             sync.RWMutex //protect concurrent map access
 }
 
 func NewFSMController() Controller {
@@ -47,13 +49,22 @@ func (c *FSMController) ShouldRewrite(meta *common.SegmentMeta) (bool, common.Co
 	}
 
 	c.updateSegmentHistory(meta)
+
+	// Lock for reading history
+	c.mu.RLock()
 	history := c.segmentHistory[meta.ID]
+	c.mu.RUnlock()
 
 	if len(history) < 3 {
 		return false, meta.Strategy, ""
 	}
 
-	if time.Since(c.lastSwitch) < MinSwitchInterval {
+	// Check switch cooldown with lock
+	c.mu.RLock()
+	timeSinceSwitch := time.Since(c.lastSwitch)
+	c.mu.RUnlock()
+
+	if timeSinceSwitch < MinSwitchInterval {
 		return false, meta.Strategy, ""
 	}
 
@@ -62,20 +73,23 @@ func (c *FSMController) ShouldRewrite(meta *common.SegmentMeta) (bool, common.Co
 
 	switch meta.Strategy {
 	case common.TIERED:
-		if readTrend > 0.3 && meta.ReadCount > 50 {
+		if readTrend > 0.3 && meta.GetReadCount() > 50 {
+			c.mu.Lock()
 			c.lastSwitch = time.Now()
+			c.mu.Unlock()
 			return true, common.LEVELED, fmt.Sprintf(
 				"sustained_read_trend=%.1f%%, rc=%d (tiered→leveled)",
-				readTrend*100, meta.ReadCount,
+				readTrend*100, meta.GetReadCount(),
 			)
 		}
-
 	case common.LEVELED:
-		if writeTrend > 0.3 && meta.WriteCount > 10 {
+		if writeTrend > 0.3 && meta.GetWriteCount() > 10 {
+			c.mu.Lock()
 			c.lastSwitch = time.Now()
+			c.mu.Unlock()
 			return true, common.TIERED, fmt.Sprintf(
 				"sustained_write_trend=%.1f%%, wc=%d (leveled→tiered)",
-				writeTrend*100, meta.WriteCount,
+				writeTrend*100, meta.GetWriteCount(),
 			)
 		}
 	}
@@ -86,9 +100,12 @@ func (c *FSMController) ShouldRewrite(meta *common.SegmentMeta) (bool, common.Co
 func (c *FSMController) updateSegmentHistory(meta *common.SegmentMeta) {
 	snapshot := MetricSnapshot{
 		Timestamp:  time.Now().Unix(),
-		ReadCount:  meta.ReadCount,
-		WriteCount: meta.WriteCount,
+		ReadCount:  meta.GetReadCount(),
+		WriteCount: meta.GetWriteCount(),
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	history := c.segmentHistory[meta.ID]
 	history = append(history, snapshot)

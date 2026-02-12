@@ -38,12 +38,10 @@ func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Close mmap before writing to invalidate cache
-	if s.isMMapped && s.mmapData != nil {
-		syscall.Munmap(s.mmapData)
-		s.isMMapped = false
-		s.mmapData = nil
-	}
+	       // Close mmap before writing to invalidate cache
+	       if s.isMMapped && s.mmapData != nil {
+		       s.releaseMmapLinux()
+	       }
 
 	//current size to know the start offset
 	stat, err := s.file.Stat()
@@ -113,14 +111,10 @@ func (s *localFileManager) ReleaseMmap() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.isMMapped && s.mmapData != nil {
-		if err := syscall.Munmap(s.mmapData); err != nil {
-			return err
-		}
-		s.isMMapped = false
-		s.mmapData = nil
-	}
-	return nil
+	       if s.isMMapped && s.mmapData != nil {
+		       return s.releaseMmapLinux()
+	       }
+	       return nil
 }
 
 // marks segment for removal
@@ -128,11 +122,20 @@ func (s *localFileManager) Delete(offset int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.isMMapped && s.mmapData != nil {
-		syscall.Munmap(s.mmapData)
-		s.isMMapped = false
-		s.mmapData = nil
-	}
+	       if s.isMMapped && s.mmapData != nil {
+		       s.releaseMmapLinux()
+	       }
+// Helper method for proper mmap cleanup
+func (s *localFileManager) releaseMmapLinux() error {
+       if s.mmapData == nil {
+	       s.isMMapped = false
+	       return nil
+       }
+       err := syscall.Munmap(s.mmapData)
+       s.isMMapped = false
+       s.mmapData = nil
+       return err
+}
 
 	if err := s.file.Close(); err != nil {
 		return err

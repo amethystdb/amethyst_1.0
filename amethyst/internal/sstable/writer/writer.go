@@ -119,22 +119,24 @@ func (w *writer) WriteSegment(
 	}
 
 	meta := &common.SegmentMeta{
-		ID:                segmentID,
-		Offset:            offset,
-		Length:            length,
-		MinKey:            minKey,
-		MaxKey:            maxKey,
-		Strategy:          strategy,
-		ReadCount:         0,
-		WriteCount:        0,
-		OverlapCount:      0, // Will be updated by Tracker
-		CreatedAt:         now,
-		LastRewriteAt:     now,
-		Obsolete:          false,
+		ID:       segmentID,
+		Offset:   offset,
+		Length:   length,
+		MinKey:   minKey,
+		MaxKey:   maxKey,
+		Strategy: strategy,
+		// readCount, writeCount are zero-initialized (private fields)
+		OverlapCount: 0, // Will be updated by Tracker
+		CreatedAt:    now,
+		// lastRewriteAt is set via method after creation
+		// obsolete is false by default (private field)
 		SparseIndex:       sparse,
 		DataStartOffset:   dataStartOffset,
 		SparseIndexOffset: sparseOffset,
 	}
+
+	// Set lastRewriteAt using the thread-safe method
+	meta.UpdateLastRewriteAt(now)
 
 	return meta, nil
 }

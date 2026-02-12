@@ -46,7 +46,7 @@ func (d *director) MaybePlan() *Plan {
 	// Check each segment: ask FSM if it should be rewritten
 	if d.fsm != nil {
 		for _, seg := range segments {
-			if seg.Obsolete {
+			if seg.IsObsolete() {
 				continue
 			}
 
@@ -90,13 +90,13 @@ func (d *director) MaybePlan() *Plan {
 func (d *director) planTieredCompaction(segments []*common.SegmentMeta) *Plan {
 	for i := 0; i < len(segments)-1; i++ {
 		seg := segments[i]
-		if seg.Obsolete {
+		if seg.IsObsolete() {
 			continue
 		}
 
 		for j := i + 1; j < len(segments); j++ {
 			candidate := segments[j]
-			if candidate.Obsolete {
+			if candidate.IsObsolete() {
 				continue
 			}
 
@@ -121,7 +121,7 @@ func (d *director) planLeveledCompaction(segments []*common.SegmentMeta) *Plan {
 	}
 
 	for _, seg := range segments {
-		if seg.Obsolete {
+		if seg.IsObsolete() {
 			continue
 		}
 
@@ -148,7 +148,7 @@ func (d *director) collectLimitedOverlaps(target *common.SegmentMeta, maxSegment
 	overlaps := d.meta.GetOverlappingSegments(target)
 
 	for _, overlap := range overlaps {
-		if !seen[overlap.ID] && !overlap.Obsolete {
+		if !seen[overlap.ID] && !overlap.IsObsolete() {
 			inputs = append(inputs, overlap)
 			seen[overlap.ID] = true
 

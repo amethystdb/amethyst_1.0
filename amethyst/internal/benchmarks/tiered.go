@@ -21,7 +21,7 @@ func (c *StaticTieredController) ShouldRewrite(meta *common.SegmentMeta) (bool, 
 	}
 
 	//threshold of 50 here for merge can change
-	if meta.WriteCount > 50 {
+	if meta.GetWriteCount() > 50 {
 		//returns true for rewrite, specifies tired
 		return true, common.TIERED, "Baseline: Static Tiered merge"
 	}
