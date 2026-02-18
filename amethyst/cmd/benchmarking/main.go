@@ -17,6 +17,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,65 @@ type PhaseResult struct {
 	Duration float64 `json:"duration_sec"`
 	WA       float64 `json:"wa"`
 	RA       float64 `json:"ra"`
+	LatP50   float64 `json:"lat_p50_us"`
+	LatP95   float64 `json:"lat_p95_us"`
+	LatP99   float64 `json:"lat_p99_us"`
+}
+
+// LatencyTracker collects latency samples
+type LatencyTracker struct {
+	ch      chan int64
+	samples []int64
+	mu      sync.Mutex
+}
+
+func NewLatencyTracker(capacity int) *LatencyTracker {
+	return &LatencyTracker{
+		ch:      make(chan int64, capacity),
+		samples: make([]int64, 0, capacity),
+	}
+}
+
+func (lt *LatencyTracker) Record(d time.Duration) {
+	select {
+	case lt.ch <- d.Nanoseconds():
+	default:
+		// Buffer full: skip to avoid blocking
+	}
+}
+
+func (lt *LatencyTracker) drain() {
+	for {
+		select {
+		case v := <-lt.ch:
+			lt.samples = append(lt.samples, v)
+		default:
+			return
+		}
+	}
+}
+
+func (lt *LatencyTracker) Finalize() {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	lt.drain()
+	sort.Slice(lt.samples, func(i, j int) bool {
+		return lt.samples[i] < lt.samples[j]
+	})
+}
+
+func (lt *LatencyTracker) Percentile(p float64) float64 {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	n := len(lt.samples)
+	if n == 0 {
+		return 0
+	}
+	idx := int(float64(n) * p)
+	if idx >= n {
+		idx = n - 1
+	}
+	return float64(lt.samples[idx]) / 1000.0 // microseconds
 }
 
 // Zipfian distribution generator
@@ -77,7 +137,6 @@ func zipfian(n int, s float64) int {
 
 func main() {
 	flag.Parse()
-	rand.Seed(time.Now().UnixNano())
 
 	// Validate inputs
 	if *numKeysFlag <= 0 {
@@ -88,7 +147,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: --value-size must be > 0\n")
 		os.Exit(1)
 	}
-
 
 	// Clean slate
 	os.Remove("wal.log")
@@ -109,7 +167,7 @@ func main() {
 		panic(err)
 	}
 
-	mem := memtable.NewMemtable(4 * 1024)
+	mem := memtable.NewMemtable(100000) // 100k entries for 10M scale
 	meta := metadata.NewTracker()
 
 	fileMgr, err := segmentfile.NewSegmentFileManager("sstable.data")
@@ -240,13 +298,20 @@ func main() {
 	totalDuration := time.Since(startTime)
 
 	// Calculate final metrics
+	finalPhysicalBytes := atomic.LoadInt64(&physicalBytes)
+	finalUserBytes := atomic.LoadInt64(&userBytes)
+	finalTotalReads := atomic.LoadInt64(&totalReads)
+	finalTotalSegmentScans := atomic.LoadInt64(&totalSegmentScans)
+	finalLogicalBytes := atomic.LoadInt64(&logicalBytes)
+	finalCompactionCount := atomic.LoadInt64(&compactionCount)
+
 	wa := 0.0
-	if userBytes > 0 {
-		wa = float64(physicalBytes) / float64(userBytes)
+	if finalUserBytes > 0 {
+		wa = float64(finalPhysicalBytes) / float64(finalUserBytes)
 	}
 	ra := 0.0
-	if totalReads > 0 {
-		ra = float64(totalSegmentScans) / float64(totalReads)
+	if finalTotalReads > 0 {
+		ra = float64(finalTotalSegmentScans) / float64(finalTotalReads)
 	}
 
 	// Space amplification - GET ACTUAL FILE SIZE
@@ -297,12 +362,12 @@ func main() {
 		WriteAmplification: wa,
 		ReadAmplification:  ra,
 		SpaceAmplification: sa,
-		CompactionCount:    int(compactionCount),
+		CompactionCount:    int(finalCompactionCount),
 		TotalDurationSec:   totalDuration.Seconds(),
-		LogicalBytes:       logicalBytes,
-		PhysicalBytes:      physicalBytes,
-		TotalReads:         totalReads,
-		SegmentScans:       totalSegmentScans,
+		LogicalBytes:       finalLogicalBytes,
+		PhysicalBytes:      finalPhysicalBytes,
+		TotalReads:         finalTotalReads,
+		SegmentScans:       finalTotalSegmentScans,
 		LiveDataBytes:      logicalDataSize,
 		TotalDiskBytes:     physicalDiskSize,
 		Phases:             phases,
@@ -316,7 +381,7 @@ func main() {
 	fmt.Printf("Write Amplification:  %.2f\n", wa)
 	fmt.Printf("Read Amplification:   %.2f\n", ra)
 	fmt.Printf("Space Amplification:  %.2f\n", sa)
-	fmt.Printf("Compaction Count:     %d\n", int(compactionCount))
+	fmt.Printf("Compaction Count:     %d\n", finalCompactionCount)
 	fmt.Printf("Total Duration:       %.2fs\n", totalDuration.Seconds())
 	fmt.Printf("Throughput:           %.0f ops/sec\n",
 		float64(*numKeysFlag)/totalDuration.Seconds())
@@ -352,6 +417,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// PHASE 1: Write (multiple rounds to create overlapping segments)
 	fmt.Println("=== PHASE 1: Write ===")
 	phase1Start := time.Now()
+	writeLatency := NewLatencyTracker(numKeys + 100000)
 
 	// Round 1: Sequential write to populate all keys
 	for i := 0; i < numKeys; i++ {
@@ -359,10 +425,12 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		val := make([]byte, valueSize)
 		rand.Read(val)
 
+		t := time.Now()
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		writeLatency.Record(time.Since(t))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -389,10 +457,12 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		val := make([]byte, valueSize)
 		rand.Read(val)
 
+		t := time.Now()
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		writeLatency.Record(time.Since(t))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -417,12 +487,16 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	}
 
 	phase1Duration := time.Since(phase1Start)
-	phase1WA := float64(*physicalBytes) / float64(*logicalBytes)
+	phase1WA := float64(atomic.LoadInt64(physicalBytes)) / float64(atomic.LoadInt64(logicalBytes))
+	writeLatency.Finalize()
 	phases = append(phases, PhaseResult{
 		Name:     "write",
 		Duration: phase1Duration.Seconds(),
 		WA:       phase1WA,
 		RA:       0,
+		LatP50:   writeLatency.Percentile(0.50),
+		LatP95:   writeLatency.Percentile(0.95),
+		LatP99:   writeLatency.Percentile(0.99),
 	})
 
 	fmt.Printf("  Segments: %d\n", len(meta.GetAllSegments()))
@@ -436,12 +510,14 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	//numReads := numKeys * 3
 	numReads := numKeys
 	var phase2SegmentScans int64 = 0
+	readLatency := NewLatencyTracker(numReads)
 
 	for i := 0; i < numReads; i++ {
 		safeKeyRange := (numKeys * 9) / 10
 		key := fmt.Sprintf("key-%010d", rand.Intn(safeKeyRange))
 
-		*totalReads++
+		t := time.Now()
+		atomic.AddInt64(totalReads, 1)
 		segs := meta.GetSegmentsForKey(key)
 		phase2SegmentScans += int64(len(segs)) // RA = total candidate segments / total reads
 
@@ -457,9 +533,10 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 				break
 			}
 		}
+		readLatency.Record(time.Since(t))
 
 		if i > 0 && i%500000 == 0 {
-			currentRA := float64(phase2SegmentScans) / float64(*totalReads)
+			currentRA := float64(phase2SegmentScans) / float64(atomic.LoadInt64(totalReads))
 			fmt.Printf("  Reads: %d/%d (%.1f%%) RA=%.2f\r", i, numReads, float64(i)*100/float64(numReads), currentRA)
 		}
 	}
@@ -468,14 +545,18 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Calculate Phase 2 metrics
 	phase2Duration := time.Since(phase2Start)
 	phase2RA := float64(phase2SegmentScans) / float64(numReads)
-	phase2WA := float64(*physicalBytes) / float64(*logicalBytes)
-	*totalSegmentScans += phase2SegmentScans
+	phase2WA := float64(atomic.LoadInt64(physicalBytes)) / float64(atomic.LoadInt64(logicalBytes))
+	atomic.AddInt64(totalSegmentScans, phase2SegmentScans)
+	readLatency.Finalize()
 
 	phases = append(phases, PhaseResult{
 		Name:     "read",
 		Duration: phase2Duration.Seconds(),
 		WA:       phase2WA,
 		RA:       phase2RA,
+		LatP50:   readLatency.Percentile(0.50),
+		LatP95:   readLatency.Percentile(0.95),
+		LatP99:   readLatency.Percentile(0.99),
 	})
 
 	fmt.Printf("  Current RA: %.2f\n", phase2RA)
@@ -487,16 +568,19 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// PHASE 3: Write again
 	fmt.Println("\n=== PHASE 3: Write (50%) ===")
 	phase3Start := time.Now()
+	write2Latency := NewLatencyTracker(numKeys/2 + 1000)
 
 	for i := 0; i < numKeys/2; i++ {
 		key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 		val := make([]byte, valueSize)
 		rand.Read(val)
 
+		t := time.Now()
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		write2Latency.Record(time.Since(t))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -525,7 +609,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	}
 
 	phase3Duration := time.Since(phase3Start)
-	phase3WA := float64(*physicalBytes) / float64(*logicalBytes)
+	phase3WA := float64(atomic.LoadInt64(physicalBytes)) / float64(atomic.LoadInt64(logicalBytes))
+	write2Latency.Finalize()
 
 	fmt.Printf("  Segments: %d\n", len(meta.GetAllSegments()))
 	fmt.Printf("  Duration: %v\n", phase3Duration)
@@ -539,12 +624,14 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	numReads4 := numKeys * 3
 	var phase4SegmentScans int64 = 0
 	var phase4Reads int64 = 0
+	read2Latency := NewLatencyTracker(numReads4)
 
 	for i := 0; i < numReads4; i++ {
 		key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 
+		t := time.Now()
 		phase4Reads++
-		*totalReads++
+		atomic.AddInt64(totalReads, 1)
 		segs := meta.GetSegmentsForKey(key)
 		phase4SegmentScans += int64(len(segs))
 
@@ -560,6 +647,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 				break
 			}
 		}
+		read2Latency.Record(time.Since(t))
 
 		if i > 0 && i%500000 == 0 {
 			currentRA := float64(phase4SegmentScans) / float64(phase4Reads)
@@ -568,11 +656,12 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	}
 	fmt.Println()
 
-	*totalSegmentScans += phase4SegmentScans
+	atomic.AddInt64(totalSegmentScans, phase4SegmentScans)
 
 	phase4Duration := time.Since(phase4Start)
 	phase4RA := float64(phase4SegmentScans) / float64(phase4Reads)
-	phase4WA := float64(*physicalBytes) / float64(*logicalBytes)
+	phase4WA := float64(atomic.LoadInt64(physicalBytes)) / float64(atomic.LoadInt64(logicalBytes))
+	read2Latency.Finalize()
 
 	fmt.Printf("  Current RA: %.2f (with overlapping segments)\n", phase4RA)
 	fmt.Printf("  Duration: %v\n", phase4Duration)
@@ -582,12 +671,18 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		Duration: phase3Duration.Seconds(),
 		WA:       phase3WA,
 		RA:       phase2RA,
+		LatP50:   write2Latency.Percentile(0.50),
+		LatP95:   write2Latency.Percentile(0.95),
+		LatP99:   write2Latency.Percentile(0.99),
 	})
 	phases = append(phases, PhaseResult{
 		Name:     "read_after_overwrites",
 		Duration: phase4Duration.Seconds(),
 		WA:       phase4WA,
 		RA:       phase4RA,
+		LatP50:   read2Latency.Percentile(0.50),
+		LatP95:   read2Latency.Percentile(0.95),
+		LatP99:   read2Latency.Percentile(0.99),
 	})
 
 	// Let background compaction catch FSM transitions from the new read load
@@ -611,8 +706,8 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -686,8 +781,8 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	}
 
 	// Reset counters
-	*logicalBytes = 0
-	*physicalBytes = 0
+	atomic.StoreInt64(logicalBytes, 0)
+	atomic.StoreInt64(physicalBytes, 0)
 
 	// Phase 2: Read
 	fmt.Println("Reading (3x)...")
@@ -696,9 +791,9 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	for i := 0; i < numReads; i++ {
 		key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 
-		*totalReads++
+		atomic.AddInt64(totalReads, 1)
 		segs := meta.GetSegmentsForKey(key)
-		*totalSegmentScans += int64(len(segs))
+		atomic.AddInt64(totalSegmentScans, int64(len(segs)))
 
 		for _, seg := range segs {
 			_, ok := sstReader.Get(seg, key)
@@ -732,8 +827,8 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -774,8 +869,8 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
-			*logicalBytes += int64(len(key) + valueSize)
-			*userBytes += int64(len(key) + len(val))
+			atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+			atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 			liveKeysMutex.Lock()
 			liveKeys[key] = len(val)
@@ -792,9 +887,9 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			// Read
 			key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 
-			*totalReads++
+			atomic.AddInt64(totalReads, 1)
 			segs := meta.GetSegmentsForKey(key)
-			*totalSegmentScans += int64(len(segs))
+			atomic.AddInt64(totalSegmentScans, int64(len(segs)))
 
 			for _, seg := range segs {
 				_, ok := sstReader.Get(seg, key)
@@ -814,9 +909,11 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Compaction
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
-		newSeg, _ := executor.Execute(plan)
-		atomic.AddInt64(physicalBytes, newSeg.Length)
-		atomic.AddInt64(compactionCount, 1)
+		newSeg, err := executor.Execute(plan)
+		if err == nil && newSeg != nil {
+			atomic.AddInt64(physicalBytes, newSeg.Length)
+			atomic.AddInt64(compactionCount, 1)
+		}
 	}
 }
 
@@ -837,8 +934,8 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -875,9 +972,9 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			// Read
 			key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 
-			*totalReads++
+			atomic.AddInt64(totalReads, 1)
 			segs := meta.GetSegmentsForKey(key)
-			*totalSegmentScans += int64(len(segs))
+			atomic.AddInt64(totalSegmentScans, int64(len(segs)))
 
 			for _, seg := range segs {
 				_, ok := sstReader.Get(seg, key)
@@ -894,8 +991,8 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
-			*logicalBytes += int64(len(key) + valueSize)
-			*userBytes += int64(len(key) + len(val))
+			atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+			atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 			liveKeysMutex.Lock()
 			liveKeys[key] = len(val)
@@ -919,9 +1016,11 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Compaction
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
-		newSeg, _ := executor.Execute(plan)
-		atomic.AddInt64(physicalBytes, newSeg.Length)
-		atomic.AddInt64(compactionCount, 1)
+		newSeg, err := executor.Execute(plan)
+		if err == nil && newSeg != nil {
+			atomic.AddInt64(physicalBytes, newSeg.Length)
+			atomic.AddInt64(compactionCount, 1)
+		}
 	}
 }
 
@@ -942,8 +1041,8 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -984,8 +1083,8 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
-			*logicalBytes += int64(len(key) + valueSize)
-			*userBytes += int64(len(key) + len(val))
+			atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+			atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 			liveKeysMutex.Lock()
 			liveKeys[key] = len(val)
@@ -1002,9 +1101,9 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			// Read
 			key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 
-			*totalReads++
+			atomic.AddInt64(totalReads, 1)
 			segs := meta.GetSegmentsForKey(key)
-			*totalSegmentScans += int64(len(segs))
+			atomic.AddInt64(totalSegmentScans, int64(len(segs)))
 
 			for _, seg := range segs {
 				_, ok := sstReader.Get(seg, key)
@@ -1024,9 +1123,11 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Compaction
 	time.Sleep(2 * time.Second)
 	if plan := director.MaybePlan(); plan != nil {
-		newSeg, _ := executor.Execute(plan)
-		atomic.AddInt64(physicalBytes, newSeg.Length)
-		atomic.AddInt64(compactionCount, 1)
+		newSeg, err := executor.Execute(plan)
+		if err == nil && newSeg != nil {
+			atomic.AddInt64(physicalBytes, newSeg.Length)
+			atomic.AddInt64(compactionCount, 1)
+		}
 	}
 }
 
@@ -1047,8 +1148,8 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
-		*logicalBytes += int64(len(key) + valueSize)
-		*userBytes += int64(len(key) + len(val))
+		atomic.AddInt64(logicalBytes, int64(len(key)+valueSize))
+		atomic.AddInt64(userBytes, int64(len(key)+len(val)))
 
 		liveKeysMutex.Lock()
 		liveKeys[key] = len(val)
@@ -1090,9 +1191,9 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		key := fmt.Sprintf("key-%010d", keyIdx)
 
-		*totalReads++
+		atomic.AddInt64(totalReads, 1)
 		segs := meta.GetSegmentsForKey(key)
-		*totalSegmentScans += int64(len(segs))
+		atomic.AddInt64(totalSegmentScans, int64(len(segs)))
 
 		for _, seg := range segs {
 			_, ok := sstReader.Get(seg, key)
