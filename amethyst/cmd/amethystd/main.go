@@ -432,7 +432,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	time.Sleep(2 * time.Second)
 
 	phase2Start := time.Now()
-	numReads := numKeys * 3
+	//numReads := numKeys * 3
+	numReads := numKeys
 	var phase2SegmentScans int64 = 0
 
 	for i := 0; i < numReads; i++ {

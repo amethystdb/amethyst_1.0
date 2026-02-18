@@ -122,9 +122,17 @@ func (w *diskWAL) ReadAll() ([]common.WALEntry, error) {
 func (w *diskWAL) Truncate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.file != nil {
-		w.file.Close()
+	
+	if w.file == nil {
+		return nil
 	}
-
-	return os.Remove(w.path)
+	
+	// Clear the file to size 0 (but keep it open)
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	
+	// Seek back to beginning for next writes
+	_, err := w.file.Seek(0, 0)
+	return err
 }
