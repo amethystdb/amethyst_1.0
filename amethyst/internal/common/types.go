@@ -28,6 +28,8 @@ type SegmentMeta struct {
 	writeCount   int64
 	OverlapCount int64
 
+	TotalComparisons int64 // Overall CPU work (comparisons) for this segment
+
 	CreatedAt     int64
 	lastRewriteAt int64
 

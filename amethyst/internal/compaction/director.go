@@ -69,15 +69,13 @@ func (d *director) MaybePlan() *Plan {
 					Inputs:         inputs,
 					OutputStrategy: newStrategy,
 					Reason:         reason,
-					TargetLevel:    targetLevel, // <-- ADDED
-				        // Only pull in overlaps from the target's level OR the level below it.
-				        if !seen[overlap.ID] && !overlap.IsObsolete() && (overlap.Level == target.Level || overlap.Level == target.Level+1) {
-				            inputs = append(inputs, overlap)
-				            seen[overlap.ID] = true
-				            if len(inputs) >= maxSegments {
-				                break
-				            }
-				        }
+					TargetLevel:    targetLevel,
+				}
+			}
+		}
+	}
+
+	switch d.currentPolicy {
 	case common.TIERED:
 		if plan := d.planTieredCompaction(segments); plan != nil {
 			return plan

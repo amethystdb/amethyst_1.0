@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 )
 
 type SSTableReader interface {
@@ -54,7 +55,8 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 	}
 
 	// Compute absolute start offset
-	start := meta.Offset + meta.DataStartOffset + idx.Seek(target)
+	var localCmps int64
+	start := meta.Offset + meta.DataStartOffset + idx.Seek(target, &localCmps)
 	end := meta.Offset + meta.SparseIndexOffset
 
 	//validate computed bounds
@@ -71,7 +73,8 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 	data := mmapData[start:end]
 	buf := bytes.NewReader(data)
 
-	for buf.Len() > 0 {
+	 for buf.Len() > 0 {
+	 	localCmps++ // Track each linear scan comparison
 		var kLen uint32
 		var vLen uint32
 		var tomb byte
@@ -105,20 +108,23 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 			}
 		}
 
-		if key == target {
-			if tomb == 1 {
-				return nil, false
-			}
-			return valBytes, true
-		}
+ 		if key == target {
+ 			atomic.AddInt64(&meta.TotalComparisons, localCmps) // Commit work to metadata
+ 			if tomb == 1 {
+ 				return nil, false
+ 			}
+ 			return valBytes, true
+ 		}
 
-		// Sorted order invariant: stop early
-		if key > target {
-			return nil, false
-		}
-	}
+ 		// Sorted order invariant: stop early
+ 		if key > target {
+ 			atomic.AddInt64(&meta.TotalComparisons, localCmps)
+ 			return nil, false
+ 		}
+ 	}
 
-	return nil, false
+ 	atomic.AddInt64(&meta.TotalComparisons, localCmps)
+ 	return nil, false
 }
 
 func (r *Reader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {
@@ -167,7 +173,7 @@ func (r *Reader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {
 	//make a copy of the data to prevent use-after-modification
 	//protects against the file being modified during scan
 	dataLen := end - start
-	if dataLen > 100*1024*1024 { //100MB max, change if doesnt make much sense
+	if dataLen > 500*1024*1024 { // 500MB max to support larger merges
 		return nil, fmt.Errorf("data too large: %d bytes", dataLen)
 	}
 

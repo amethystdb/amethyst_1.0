@@ -47,6 +47,8 @@ type Results struct {
 	LiveDataBytes      int64         `json:"live_data_bytes"`
 	TotalDiskBytes     int64         `json:"total_disk_bytes"`
 	Phases             []PhaseResult `json:"phases,omitempty"`
+	TotalComparisons    int64   `json:"total_comparisons"`
+	AvgComparisonsPerRead float64 `json:"avg_comparisons_per_read"`
 }
 
 type PhaseResult struct {
@@ -288,6 +290,17 @@ func main() {
 		sa = 0.0
 	}
 
+	// Calculate CPU metrics
+	var aggregatedComparisons int64
+	for _, seg := range meta.GetAllSegments() {
+		aggregatedComparisons += atomic.LoadInt64(&seg.TotalComparisons)
+	}
+
+	avgCmps := 0.0
+	if totalReads > 0 {
+		avgCmps = float64(aggregatedComparisons) / float64(totalReads)
+	}
+
 	// Create results
 	results := Results{
 		Engine:             *engineFlag,
@@ -306,6 +319,8 @@ func main() {
 		LiveDataBytes:      logicalDataSize,
 		TotalDiskBytes:     physicalDiskSize,
 		Phases:             phases,
+		TotalComparisons:   aggregatedComparisons,
+		AvgComparisonsPerRead: avgCmps,
 	}
 
 	// Print summary
@@ -320,6 +335,8 @@ func main() {
 	fmt.Printf("Total Duration:       %.2fs\n", totalDuration.Seconds())
 	fmt.Printf("Throughput:           %.0f ops/sec\n",
 		float64(*numKeysFlag)/totalDuration.Seconds())
+	fmt.Printf("Total Comparisons:    %d\n", aggregatedComparisons)
+	fmt.Printf("Avg Comparisons/Read: %.2f\n", avgCmps)
 	fmt.Println()
 
 	// Save to JSON

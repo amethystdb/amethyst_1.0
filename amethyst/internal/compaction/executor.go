@@ -118,8 +118,8 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 	}
 
 	// Improved logging for Suchi to see the merge happening
-	log.Printf("ADAPTIVE MERGE: %d segments -> 1 (Strategy: %v, Reason: %s)",
-		len(plan.Inputs), plan.OutputStrategy, plan.Reason)
+	log.Printf("ADAPTIVE MERGE: %d segs merged into 1 @ Level %d (Strategy: %v, Reason: %s)",
+		len(plan.Inputs), newSeg.Level, plan.OutputStrategy, plan.Reason)
 
 	return newSeg, nil
 }
