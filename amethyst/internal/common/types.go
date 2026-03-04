@@ -14,6 +14,7 @@ const (
 
 type SegmentMeta struct {
 	ID     string
+	Level  int 
 	Offset int64
 	Length int64
 

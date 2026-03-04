@@ -370,7 +370,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -400,7 +400,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -411,7 +411,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -504,7 +504,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -519,7 +519,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -620,7 +620,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -635,7 +635,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -667,7 +667,7 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			meta.RegisterSegment(seg)
 			w.Truncate()
 		}
@@ -681,7 +681,7 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		meta.RegisterSegment(seg)
 	}
 
@@ -741,7 +741,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -756,7 +756,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -783,7 +783,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			if mem.ShouldFlush() {
 				data := mem.Flush()
-				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+				seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
@@ -846,7 +846,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -861,7 +861,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -903,7 +903,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			if mem.ShouldFlush() {
 				data := mem.Flush()
-				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+				seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
@@ -951,7 +951,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -966,7 +966,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -993,7 +993,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			if mem.ShouldFlush() {
 				data := mem.Flush()
-				seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+				seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 				atomic.AddInt64(physicalBytes, seg.Length)
 				meta.RegisterSegment(seg)
 				w.Truncate()
@@ -1056,7 +1056,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		if mem.ShouldFlush() {
 			data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 			atomic.AddInt64(physicalBytes, seg.Length)
 			meta.RegisterSegment(seg)
 			w.Truncate()
@@ -1071,7 +1071,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-		seg, _ := sstWriter.WriteSegment(data, common.TIERED)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}

@@ -85,6 +85,13 @@ func (t *tracker) GetSegmentsForKey(key string) []*common.SegmentMeta {
 			result = append(result, seg)
 		}
 	}
+    // Sort by Level (ascending), then CreatedAt (descending)
+    sort.Slice(result, func(i, j int) bool {
+        if result[i].Level != result[j].Level {
+            return result[i].Level < result[j].Level
+        }
+        return result[i].CreatedAt > result[j].CreatedAt
+    })
 	return result
 }
 
@@ -99,10 +106,13 @@ func (t *tracker) GetAllSegments() []*common.SegmentMeta {
 		}
 	}
 
-	// Sort by MinKey while holding the lock
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].MinKey < result[j].MinKey
-	})
+    // Sort by Level (ascending), then CreatedAt (descending)
+    sort.Slice(result, func(i, j int) bool {
+        if result[i].Level != result[j].Level {
+            return result[i].Level < result[j].Level
+        }
+        return result[i].CreatedAt > result[j].CreatedAt
+    })
 
 	return result
 }

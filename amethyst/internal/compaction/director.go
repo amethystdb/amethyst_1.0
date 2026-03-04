@@ -10,6 +10,7 @@ type Plan struct {
 	Inputs         []*common.SegmentMeta
 	OutputStrategy common.CompactionType
 	Reason         string
+	TargetLevel    int   // <-- ADDED
 }
 
 type Director interface {
@@ -56,23 +57,27 @@ func (d *director) MaybePlan() *Plan {
 				d.currentPolicy = newStrategy
 
 				var inputs []*common.SegmentMeta
+				targetLevel := seg.Level
+
 				if newStrategy == common.LEVELED {
 					inputs = d.collectLimitedOverlaps(seg, 50)
+					targetLevel = seg.Level + 1 // Push down on Leveled transition
 				} else {
 					inputs = []*common.SegmentMeta{seg}
 				}
-
 				return &Plan{
 					Inputs:         inputs,
 					OutputStrategy: newStrategy,
 					Reason:         reason,
-				}
-			}
-		}
-	}
-
-	// Fall back to strategy-specific compaction
-	switch d.currentPolicy {
+					TargetLevel:    targetLevel, // <-- ADDED
+				        // Only pull in overlaps from the target's level OR the level below it.
+				        if !seen[overlap.ID] && !overlap.IsObsolete() && (overlap.Level == target.Level || overlap.Level == target.Level+1) {
+				            inputs = append(inputs, overlap)
+				            seen[overlap.ID] = true
+				            if len(inputs) >= maxSegments {
+				                break
+				            }
+				        }
 	case common.TIERED:
 		if plan := d.planTieredCompaction(segments); plan != nil {
 			return plan
@@ -99,6 +104,10 @@ func (d *director) planTieredCompaction(segments []*common.SegmentMeta) *Plan {
 			if candidate.IsObsolete() {
 				continue
 			}
+            // Only merge Tiered runs if they are on the same level!
+            if seg.Level != candidate.Level {
+                continue
+            }
 
 			sizeRatio := float64(seg.Length) / float64(candidate.Length)
 			if sizeRatio < 2.0 && sizeRatio > 0.5 {
@@ -106,6 +115,7 @@ func (d *director) planTieredCompaction(segments []*common.SegmentMeta) *Plan {
 					Inputs:         []*common.SegmentMeta{seg, candidate},
 					OutputStrategy: common.TIERED,
 					Reason:         "tiered: merging similar-sized sorted runs",
+					TargetLevel:    segments[i].Level, // Tiered stays at same level
 				}
 			}
 		}
@@ -132,6 +142,7 @@ func (d *director) planLeveledCompaction(segments []*common.SegmentMeta) *Plan {
 				Inputs:         inputs,
 				OutputStrategy: common.LEVELED,
 				Reason:         "leveled: merging overlapping ranges",
+				TargetLevel:    seg.Level + 1, // Leveled pushes down
 			}
 		}
 	}

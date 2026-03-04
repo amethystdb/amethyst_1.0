@@ -101,7 +101,7 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 		})
 	}
 
-	newSeg, err := e.writer.WriteSegment(finalEntries, plan.OutputStrategy)
+	newSeg, err := e.writer.WriteSegment(finalEntries, plan.OutputStrategy, plan.TargetLevel)
 	if err != nil {
 		return nil, err
 	}

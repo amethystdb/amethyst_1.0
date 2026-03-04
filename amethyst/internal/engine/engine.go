@@ -53,7 +53,8 @@ func (e *Engine) ExecuteFlush() error {
 
 	//Hand off to the SSTable Writer (The disk storage logic)
 	//TIERED default for new flushes?
-	_, err := e.writer.WriteSegment(data, common.TIERED)
+	// Pass 0 as the level
+	_, err := e.writer.WriteSegment(data, common.TIERED, 0)
 	if err != nil {
 		return fmt.Errorf("SSTable write failure: %w", err)
 	}
