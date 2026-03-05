@@ -24,9 +24,11 @@ import (
 
 var (
 	workloadFlag  = flag.String("workload", "shift", "Workload type")
-	numKeysFlag   = flag.Int("keys", 10000000, "Number of keys")
+	numKeysFlag   = flag.Int("keys", 1000000, "Number of keys")
 	valueSizeFlag = flag.Int("value-size", 256, "Value size in bytes")
 	engineFlag    = flag.String("engine", "adaptive", "Engine name for output")
+
+
 )
 
 // Results structure for JSON output
@@ -49,6 +51,9 @@ type Results struct {
 	Phases             []PhaseResult `json:"phases,omitempty"`
 	TotalComparisons    int64   `json:"total_comparisons"`
 	AvgComparisonsPerRead float64 `json:"avg_comparisons_per_read"`
+	LogicalWriteBytes   int64 `json:"logical_write_bytes"`  // User Puts
+	PhysicalWriteBytes  int64 `json:"physical_write_bytes"` // SSTable Appends
+	CompactionWriteBytes int64 `json:"compaction_write_bytes"` // Background churn
 }
 
 type PhaseResult struct {
@@ -192,17 +197,19 @@ func main() {
 
 	startTime := time.Now()
 
+	// Track logical write bytes
+	var logicalWriteBytes int64 = 0
 	// Run workload
 	switch *workloadFlag {
 	case "shift":
 		phases = runShift(w, mem, meta, sstWriter, sstReader, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex)
+			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	case "pure-write":
 		runPureWrite(w, mem, meta, sstWriter, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes, &compactionCount,
-			liveKeys, &liveKeysMutex)
+			liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	case "pure-read":
 		runPureRead(w, mem, meta, sstWriter, sstReader,
@@ -212,22 +219,22 @@ func main() {
 	case "mixed":
 		runMixed(w, mem, meta, sstWriter, sstReader, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex)
+			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	case "read-heavy":
 		runReadHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex)
+			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	case "write-heavy":
 		runWriteHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex)
+			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	case "zipfian":
 		runZipfian(w, mem, meta, sstWriter, sstReader, director, executor,
 			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex)
+			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
 	default:
 		fmt.Printf("Unknown workload: %s\n", *workloadFlag)
@@ -290,10 +297,20 @@ func main() {
 		sa = 0.0
 	}
 
-	// Calculate CPU metrics
+	// --- I/O & CPU Aggregation ---
 	var aggregatedComparisons int64
-	for _, seg := range meta.GetAllSegments() {
+	var totalPhysicalWrite int64
+	var totalCompactionWrite int64
+
+	allFinalSegs := meta.GetAllSegments()
+	for _, seg := range allFinalSegs {
 		aggregatedComparisons += atomic.LoadInt64(&seg.TotalComparisons)
+		// Categorize Physical I/O based on Level
+		if seg.Level == 0 {
+			totalPhysicalWrite += seg.Length // Flush I/O
+		} else {
+			totalCompactionWrite += seg.Length // Compaction I/O
+		}
 	}
 
 	avgCmps := 0.0
@@ -321,6 +338,9 @@ func main() {
 		Phases:             phases,
 		TotalComparisons:   aggregatedComparisons,
 		AvgComparisonsPerRead: avgCmps,
+		LogicalWriteBytes: logicalWriteBytes,
+        PhysicalWriteBytes:   atomic.LoadInt64(&writer.GlobalPhysicalWriteBytes),
+        CompactionWriteBytes: atomic.LoadInt64(&writer.GlobalCompactionWriteBytes),
 	}
 
 	// Print summary
@@ -331,12 +351,16 @@ func main() {
 	fmt.Printf("Write Amplification:  %.2f\n", wa)
 	fmt.Printf("Read Amplification:   %.2f\n", ra)
 	fmt.Printf("Space Amplification:  %.2f\n", sa)
-	fmt.Printf("Compaction Count:     %d\n", int(compactionCount))
-	fmt.Printf("Total Duration:       %.2fs\n", totalDuration.Seconds())
-	fmt.Printf("Throughput:           %.0f ops/sec\n",
-		float64(*numKeysFlag)/totalDuration.Seconds())
+	fmt.Printf("------------------------------------------\n")
+	fmt.Printf("Logical Writes:       %.2f MB\n", float64(logicalWriteBytes)/(1024*1024))
+	fmt.Printf("Physical Flush I/O:   %.2f MB\n", float64(atomic.LoadInt64(&writer.GlobalPhysicalWriteBytes))/(1024*1024))
+	fmt.Printf("Compaction I/O:       %.2f MB\n", float64(atomic.LoadInt64(&writer.GlobalCompactionWriteBytes))/(1024*1024))
+	fmt.Printf("------------------------------------------\n")
 	fmt.Printf("Total Comparisons:    %d\n", aggregatedComparisons)
 	fmt.Printf("Avg Comparisons/Read: %.2f\n", avgCmps)
+	fmt.Printf("Compaction Count:     %d\n", compactionCount)
+	fmt.Printf("Total Duration:       %.2fs\n", totalDuration.Seconds())
+	fmt.Printf("Throughput:           %.0f ops/sec\n", float64(*numKeysFlag)/totalDuration.Seconds())
 	fmt.Println()
 
 	// Save to JSON
@@ -362,7 +386,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) []PhaseResult {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) []PhaseResult {
 
 	var phases []PhaseResult
 
@@ -378,6 +402,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
+		entrySize := int64(len(key) + len(val))
+		atomic.AddInt64(logicalWriteBytes, entrySize)
 		*logicalBytes += int64(len(key) + valueSize)
 		*userBytes += int64(len(key) + len(val))
 
@@ -408,6 +434,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
+		entrySize := int64(len(key) + len(val))
+		atomic.AddInt64(logicalWriteBytes, entrySize)
 		*logicalBytes += int64(len(key) + valueSize)
 		*userBytes += int64(len(key) + len(val))
 
@@ -512,6 +540,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
+		entrySize := int64(len(key) + len(val))
+		atomic.AddInt64(logicalWriteBytes, entrySize)
 		*logicalBytes += int64(len(key) + valueSize)
 		*userBytes += int64(len(key) + len(val))
 
@@ -617,7 +647,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes *int64, compactionCount *int64,
-	liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) {
 
 	fmt.Println("=== PURE WRITE WORKLOAD ===")
 
@@ -628,6 +658,8 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
+		entrySize := int64(len(key) + len(val))
+		atomic.AddInt64(logicalWriteBytes, entrySize)
 		*logicalBytes += int64(len(key) + valueSize)
 		*userBytes += int64(len(key) + len(val))
 
@@ -736,7 +768,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) {
 
 	fmt.Println("=== MIXED WORKLOAD (50/50) ===")
 
@@ -783,7 +815,7 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	numOps := numKeys * 2
 
 	for i := 0; i < numOps; i++ {
-		if rand.Float32() < 0.5 {
+		if rand.Float32() < 0.95 {
 			// Write
 			key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
 			val := make([]byte, valueSize)
@@ -791,6 +823,8 @@ func runMixed(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
+			entrySize := int64(len(key) + len(val))
+			atomic.AddInt64(logicalWriteBytes, entrySize)
 			*logicalBytes += int64(len(key) + valueSize)
 			*userBytes += int64(len(key) + len(val))
 
@@ -841,7 +875,7 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) {
 
 	fmt.Println("=== READ-HEAVY WORKLOAD (95% reads) ===")
 
@@ -911,6 +945,8 @@ func runReadHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
+			entrySize := int64(len(key) + len(val))
+			atomic.AddInt64(logicalWriteBytes, entrySize)
 			*logicalBytes += int64(len(key) + valueSize)
 			*userBytes += int64(len(key) + len(val))
 
@@ -946,7 +982,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) {
 
 	fmt.Println("=== WRITE-HEAVY WORKLOAD (95% writes) ===")
 
@@ -988,7 +1024,7 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		meta.RegisterSegment(seg)
 	}
 
-	// Operations (95% write)
+	// Mixed ops: 95% writes, 5% reads
 	fmt.Println("Running write-heavy operations...")
 	numOps := numKeys * 2
 
@@ -1001,6 +1037,8 @@ func runWriteHeavy(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 			w.LogPut(key, val)
 			mem.Put(key, val)
+			entrySize := int64(len(key) + len(val))
+			atomic.AddInt64(logicalWriteBytes, entrySize)
 			*logicalBytes += int64(len(key) + valueSize)
 			*userBytes += int64(len(key) + len(val))
 
@@ -1051,7 +1089,7 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
 	director compaction.Director, executor compaction.Executor,
 	numKeys, valueSize int, logicalBytes, physicalBytes, userBytes, totalReads, totalSegmentScans *int64,
-	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex) {
+	compactionCount *int64, liveKeys map[string]int, liveKeysMutex *sync.RWMutex, logicalWriteBytes *int64) {
 
 	fmt.Println("=== ZIPFIAN WORKLOAD (hot keys, s=1.5) ===")
 
@@ -1064,6 +1102,8 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 		w.LogPut(key, val)
 		mem.Put(key, val)
+		entrySize := int64(len(key) + len(val))
+		atomic.AddInt64(logicalWriteBytes, entrySize)
 		*logicalBytes += int64(len(key) + valueSize)
 		*userBytes += int64(len(key) + len(val))
 

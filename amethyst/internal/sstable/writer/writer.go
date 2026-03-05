@@ -1,14 +1,16 @@
 package writer
-
 import (
+	"sync/atomic"
 	"amethyst/internal/common"
 	"amethyst/internal/segmentfile"
 	"amethyst/internal/sparseindex"
 	"encoding/binary"
 	"time"
-
 	"github.com/google/uuid"
 )
+// Global counters for physical and compaction writes
+var GlobalPhysicalWriteBytes int64
+var GlobalCompactionWriteBytes int64
 
 type SSTableWriter interface {
 	// Updated to accept the sorted slice from Memtable
@@ -118,6 +120,13 @@ func (w *writer) WriteSegment(
 	offset, length, err := w.fileMgr.Append(buf)
 	if err != nil {
 		return nil, err
+	}
+	if level == 0 {
+		// Count this as a direct Flush from Memtable
+		atomic.AddInt64(&GlobalPhysicalWriteBytes, length)
+	} else {
+		// Count this as background Compaction work
+		atomic.AddInt64(&GlobalCompactionWriteBytes, length)
 	}
 
 	meta := &common.SegmentMeta{

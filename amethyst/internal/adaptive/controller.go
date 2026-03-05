@@ -73,7 +73,7 @@ func (c *FSMController) ShouldRewrite(meta *common.SegmentMeta) (bool, common.Co
 
 	switch meta.Strategy {
 	case common.TIERED:
-		if readTrend > 0.3 && meta.GetReadCount() > 50 {
+		if readTrend > 0.3 && meta.GetReadCount() > 500 {
 			c.mu.Lock()
 			c.lastSwitch = time.Now()
 			c.mu.Unlock()

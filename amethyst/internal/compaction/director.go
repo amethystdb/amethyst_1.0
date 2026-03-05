@@ -150,24 +150,29 @@ func (d *director) planLeveledCompaction(segments []*common.SegmentMeta) *Plan {
 
 // collectLimitedOverlaps prevents massive compactions by limiting segment count
 func (d *director) collectLimitedOverlaps(target *common.SegmentMeta, maxSegments int) []*common.SegmentMeta {
-	inputs := []*common.SegmentMeta{target}
-	seen := make(map[string]bool)
-	seen[target.ID] = true
+		// Clear the backlog in one shot with a large merge
+		if maxSegments > 50 {
+			maxSegments = 50
+		}
 
-	overlaps := d.meta.GetOverlappingSegments(target)
+		inputs := []*common.SegmentMeta{target}
+		seen := make(map[string]bool)
+		seen[target.ID] = true
 
-	for _, overlap := range overlaps {
-		if !seen[overlap.ID] && !overlap.IsObsolete() {
-			inputs = append(inputs, overlap)
-			seen[overlap.ID] = true
+		overlaps := d.meta.GetOverlappingSegments(target)
 
-			if len(inputs) >= maxSegments {
-				break
+		for _, overlap := range overlaps {
+			if !seen[overlap.ID] && !overlap.IsObsolete() {
+				inputs = append(inputs, overlap)
+				seen[overlap.ID] = true
+
+				if len(inputs) >= maxSegments {
+					break
+				}
 			}
 		}
-	}
 
-	return inputs
+		return inputs
 }
 
 // GetCurrentPolicy returns the active compaction strategy
