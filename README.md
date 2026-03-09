@@ -1,8 +1,5 @@
-<div align="center">
-  <img src="amethyst logo.svg" alt="Amethyst Logo" width="200">
-</div>
 
-# Amethyst
+# <img src="amethyst_logo.svg" alt="Amethyst Logo" height="40"> Amethyst
 
 Amethyst is a prototype LSM-tree storage engine written in Go that introduces **segment-level adaptive compaction**. Instead of committing to a single global compaction policy (leveled or tiered) upfront, Amethyst attaches a compaction strategy to each SSTable segment individually and switches strategies on the fly as access patterns change.
 
