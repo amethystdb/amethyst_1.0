@@ -3,6 +3,7 @@ package segmentfile
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -15,11 +16,13 @@ type SegmentFileManager interface {
 }
 
 type localFileManager struct {
-	file      *os.File
-	path      string //for Delete() to find file
-	mu        sync.RWMutex
-	mmapData  []byte
-	isMMapped bool
+	file         *os.File
+	path         string
+	mu           sync.RWMutex
+	mmapData     []byte
+	mmappedSize  int64  // Track current mmap size
+	isMMapped    bool
+	activeReads  int32  // Reference count for active readers
 }
 
 func NewSegmentFileManager(path string) (SegmentFileManager, error) {
@@ -29,23 +32,17 @@ func NewSegmentFileManager(path string) (SegmentFileManager, error) {
 	}
 	return &localFileManager{
 		file: f,
-		path: path, // Initialize the path
+		path: path,
 	}, nil
 }
 
-// adds data to the end of the file,returns location
 func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Close mmap before writing to invalidate cache
-	if s.isMMapped && s.mmapData != nil {
-		syscall.Munmap(s.mmapData)
-		s.isMMapped = false
-		s.mmapData = nil
-	}
+	// DON'T unmap on every write - let it stay mapped
+	// The OS will make writes visible through MAP_SHARED
 
-	//current size to know the start offset
 	stat, err := s.file.Stat()
 	if err != nil {
 		return 0, 0, err
@@ -53,17 +50,23 @@ func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 	offset := stat.Size()
 	length := int64(len(data))
 
-	//write the data to the end
 	_, err = s.file.Write(data)
 	if err != nil {
+		return 0, 0, err
+	}
+
+	// Force sync to ensure data is on disk
+	if err := s.file.Sync(); err != nil {
 		return 0, 0, err
 	}
 
 	return offset, length, nil
 }
 
-// retrieves a part of data without reading the whole file
 func (s *localFileManager) ReadAt(offset int64, length int64) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
 	buf := make([]byte, length)
 	_, err := s.file.ReadAt(buf, offset)
 	if err != nil {
@@ -72,19 +75,61 @@ func (s *localFileManager) ReadAt(offset int64, length int64) ([]byte, error) {
 	return buf, nil
 }
 
-// GetMmapData returns memory-mapped data for efficient zero-copy access
 func (s *localFileManager) GetMmapData() ([]byte, error) {
+	// Increment reader count
+	atomic.AddInt32(&s.activeReads, 1)
+	defer atomic.AddInt32(&s.activeReads, -1)
+
 	s.mu.RLock()
 	if s.isMMapped && s.mmapData != nil {
-		defer s.mu.RUnlock()
+		// Check if file grew beyond current mapping
+		stat, err := s.file.Stat()
+		if err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+		
+		// If file didn't grow much, reuse existing mmap
+		if stat.Size() <= s.mmappedSize {
+			defer s.mu.RUnlock()
+			return s.mmapData, nil
+		}
+		s.mu.RUnlock()
+		
+		// Need to remap - upgrade to write lock
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		
+		// Double-check after acquiring write lock
+		if stat.Size() <= s.mmappedSize {
+			return s.mmapData, nil
+		}
+		
+		// Unmap old mapping
+		if s.mmapData != nil {
+			syscall.Munmap(s.mmapData)
+		}
+		
+		// Remap with new size
+		data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()), 
+			syscall.PROT_READ, syscall.MAP_SHARED)
+		if err != nil {
+			s.isMMapped = false
+			return nil, err
+		}
+		
+		s.mmapData = data
+		s.mmappedSize = stat.Size()
+		s.isMMapped = true
 		return s.mmapData, nil
 	}
 	s.mu.RUnlock()
 
+	// First time mapping
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Double-check after acquiring write lock
+	// Double-check
 	if s.isMMapped && s.mmapData != nil {
 		return s.mmapData, nil
 	}
@@ -98,32 +143,41 @@ func (s *localFileManager) GetMmapData() ([]byte, error) {
 		return []byte{}, nil
 	}
 
-	data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()), 
+		syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		return nil, err
 	}
+	
 	s.mmapData = data
+	s.mmappedSize = stat.Size()
 	s.isMMapped = true
 
 	return s.mmapData, nil
 }
 
-// ReleaseMmap closes the mmap
 func (s *localFileManager) ReleaseMmap() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Wait for active readers
+	for atomic.LoadInt32(&s.activeReads) > 0 {
+		s.mu.Unlock()
+		// Brief sleep to let readers finish
+		// time.Sleep(10 * time.Millisecond)
+		s.mu.Lock()
+	}
+
 	if s.isMMapped && s.mmapData != nil {
-		if err := syscall.Munmap(s.mmapData); err != nil {
-			return err
-		}
+		err := syscall.Munmap(s.mmapData)
 		s.isMMapped = false
 		s.mmapData = nil
+		s.mmappedSize = 0
+		return err
 	}
 	return nil
 }
 
-// marks segment for removal
 func (s *localFileManager) Delete(offset int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,6 +186,7 @@ func (s *localFileManager) Delete(offset int64) error {
 		syscall.Munmap(s.mmapData)
 		s.isMMapped = false
 		s.mmapData = nil
+		s.mmappedSize = 0
 	}
 
 	if err := s.file.Close(); err != nil {

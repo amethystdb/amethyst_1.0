@@ -1,20 +1,23 @@
 package writer
-
 import (
+	"sync/atomic"
 	"amethyst/internal/common"
 	"amethyst/internal/segmentfile"
 	"amethyst/internal/sparseindex"
 	"encoding/binary"
 	"time"
-
 	"github.com/google/uuid"
 )
+// Global counters for physical and compaction writes
+var GlobalPhysicalWriteBytes int64
+var GlobalCompactionWriteBytes int64
 
 type SSTableWriter interface {
 	// Updated to accept the sorted slice from Memtable
 	WriteSegment(
 		sortedData []common.KVEntry,
 		strategy common.CompactionType,
+		level int,
 	) (*common.SegmentMeta, error)
 }
 
@@ -33,6 +36,7 @@ func NewWriter(fileMgr segmentfile.SegmentFileManager, indexBuilder sparseindex.
 func (w *writer) WriteSegment(
 	sortedData []common.KVEntry,
 	strategy common.CompactionType,
+	level int, // <-- ADDED
 ) (*common.SegmentMeta, error) {
 	segmentID := uuid.New().String()
 	now := time.Now().Unix()
@@ -117,24 +121,34 @@ func (w *writer) WriteSegment(
 	if err != nil {
 		return nil, err
 	}
+	if level == 0 {
+		// Count this as a direct Flush from Memtable
+		atomic.AddInt64(&GlobalPhysicalWriteBytes, length)
+	} else {
+		// Count this as background Compaction work
+		atomic.AddInt64(&GlobalCompactionWriteBytes, length)
+	}
 
 	meta := &common.SegmentMeta{
-		ID:                segmentID,
-		Offset:            offset,
-		Length:            length,
-		MinKey:            minKey,
-		MaxKey:            maxKey,
-		Strategy:          strategy,
-		ReadCount:         0,
-		WriteCount:        0,
-		OverlapCount:      0, // Will be updated by Tracker
-		CreatedAt:         now,
-		LastRewriteAt:     now,
-		Obsolete:          false,
+		ID:       segmentID,
+		Level:    level, // <-- ADDED
+		Offset:   offset,
+		Length:   length,
+		MinKey:   minKey,
+		MaxKey:   maxKey,
+		Strategy: strategy,
+		// readCount, writeCount are zero-initialized (private fields)
+		OverlapCount: 0, // Will be updated by Tracker
+		CreatedAt:    now,
+		// lastRewriteAt is set via method after creation
+		// obsolete is false by default (private field)
 		SparseIndex:       sparse,
 		DataStartOffset:   dataStartOffset,
 		SparseIndexOffset: sparseOffset,
 	}
+
+	// Set lastRewriteAt using the thread-safe method
+	meta.UpdateLastRewriteAt(now)
 
 	return meta, nil
 }

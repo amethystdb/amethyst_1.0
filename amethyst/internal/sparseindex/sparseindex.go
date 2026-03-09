@@ -1,6 +1,9 @@
 package sparseindex
 
-import "sort"
+import (
+	"sort"
+	"sync/atomic"
+)
 
 const DefaultStride = 16
 
@@ -47,13 +50,16 @@ func (b *builder) Build(sortedKeys []string, offsets []int64) *SparseIndex {
 //seek function to find largest indexed key, for given object <=target
 //if target is smaller than all indexed keys it returns 0 (keep in mind)
 
-func (s *SparseIndex) Seek(target string) int64 {
+func (s *SparseIndex) Seek(target string, counter *int64) int64 {
 	if len(s.Keys) == 0 {
 		return 0
 	}
-	i := sort.Search(len(s.Keys), func(i int) bool {
-		return s.Keys[i] > target
-	})
+ 	i := sort.Search(len(s.Keys), func(i int) bool {
+ 		if counter != nil {
+ 			atomic.AddInt64(counter, 1) // Each step of binary search is 1 comparison
+ 		}
+ 		return s.Keys[i] > target
+ 	})
 	if i == 0 {
 		return 0
 	}

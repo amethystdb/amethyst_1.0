@@ -6,6 +6,8 @@ import (
 	"amethyst/internal/sparseindex"
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"sync/atomic"
 )
 
 type SSTableReader interface {
@@ -22,6 +24,11 @@ func NewReader(fileMgr segmentfile.SegmentFileManager) *Reader {
 }
 
 func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
+	//validate segment is not obsolete
+	if meta == nil || meta.IsObsolete() {
+		return nil, false
+	}
+
 	// Fast reject by key range
 	if target < meta.MinKey || target > meta.MaxKey {
 		return nil, false
@@ -38,12 +45,27 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 		return nil, false
 	}
 
+	//validate segment bounds b4 computing offsets
+	if meta.Offset < 0 || meta.Length <= 0 {
+		return nil, false
+	}
+
+	if meta.Offset+meta.Length > int64(len(mmapData)) {
+		return nil, false
+	}
+
 	// Compute absolute start offset
-	start := meta.Offset + meta.DataStartOffset + idx.Seek(target)
+	var localCmps int64
+	start := meta.Offset + meta.DataStartOffset + idx.Seek(target, &localCmps)
 	end := meta.Offset + meta.SparseIndexOffset
 
-	// Check bounds
+	//validate computed bounds
 	if start < 0 || end > int64(len(mmapData)) || start > end {
+		return nil, false
+	}
+
+	// ensure we're within segment bounds
+	if start < meta.Offset || end > meta.Offset+meta.Length {
 		return nil, false
 	}
 
@@ -51,7 +73,8 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 	data := mmapData[start:end]
 	buf := bytes.NewReader(data)
 
-	for buf.Len() > 0 {
+	 for buf.Len() > 0 {
+	 	localCmps++ // Track each linear scan comparison
 		var kLen uint32
 		var vLen uint32
 		var tomb byte
@@ -63,6 +86,11 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 			return nil, false
 		}
 		if err := binary.Read(buf, binary.BigEndian, &tomb); err != nil {
+			return nil, false
+		}
+
+		//validate lengths to prevent huge allocations
+		if kLen > 1024*1024 || vLen > 10*1024*1024 {
 			return nil, false
 		}
 
@@ -80,42 +108,94 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 			}
 		}
 
-		if key == target {
-			if tomb == 1 {
-				return nil, false
-			}
-			return valBytes, true
-		}
+ 		if key == target {
+ 			atomic.AddInt64(&meta.TotalComparisons, localCmps) // Commit work to metadata
+ 			if tomb == 1 {
+ 				return nil, false
+ 			}
+ 			return valBytes, true
+ 		}
 
-		// Sorted order invariant: stop early
-		if key > target {
-			return nil, false
-		}
-	}
+ 		// Sorted order invariant: stop early
+ 		if key > target {
+ 			atomic.AddInt64(&meta.TotalComparisons, localCmps)
+ 			return nil, false
+ 		}
+ 	}
 
-	return nil, false
+ 	atomic.AddInt64(&meta.TotalComparisons, localCmps)
+ 	return nil, false
 }
 
 func (r *Reader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {
+	//validate segment before scanning
+	if meta == nil {
+		return nil, fmt.Errorf("nil segment metadata")
+	}
+
+	if meta.IsObsolete() {
+		return nil, fmt.Errorf("cannot scan obsolete segment %s", meta.ID)
+	}
+
+	if meta.Offset < 0 || meta.Length <= 0 {
+		return nil, fmt.Errorf("invalid segment bounds: offset=%d, length=%d", meta.Offset, meta.Length)
+	}
+
 	result := make(map[string][]byte)
 
 	// Get mmapped data
 	mmapData, err := r.fileMgr.GetMmapData()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get mmap data: %w", err)
+	}
+
+	//validate segment is within file bounds
+	if meta.Offset+meta.Length > int64(len(mmapData)) {
+		return nil, fmt.Errorf("segment exceeds file bounds: offset=%d, length=%d, fileSize=%d",
+			meta.Offset, meta.Length, len(mmapData))
 	}
 
 	start := meta.Offset + meta.DataStartOffset
 	end := meta.Offset + meta.SparseIndexOffset
 
-	// Check bounds
+	//check bounds
 	if start < 0 || end > int64(len(mmapData)) || start > end {
-		return nil, nil
+		return nil, fmt.Errorf("invalid data bounds: start=%d, end=%d, mmapSize=%d",
+			start, end, len(mmapData))
 	}
 
-	// Use direct slice from mmap - zero copy!
-	data := mmapData[start:end]
-	buf := bytes.NewReader(data)
+	//ensure we're in segment
+	if start < meta.Offset || end > meta.Offset+meta.Length {
+		return nil, fmt.Errorf("data range outside segment: start=%d, end=%d, segStart=%d, segEnd=%d",
+			start, end, meta.Offset, meta.Offset+meta.Length)
+	}
+
+	//make a copy of the data to prevent use-after-modification
+	//protects against the file being modified during scan
+	dataLen := end - start
+	if dataLen > 500*1024*1024 { // 500MB max to support larger merges
+		return nil, fmt.Errorf("data too large: %d bytes", dataLen)
+	}
+
+	//re-validate before copy
+	//catches the race where file grew between first check and now
+	mmapData2, err := r.fileMgr.GetMmapData()
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-fetch mmap data: %w", err)
+	}
+	//If file grew, use new data. If shrank, fail.
+	if len(mmapData2) < len(mmapData) {
+		return nil, fmt.Errorf("file shrank during scan")
+	}
+	if end > int64(len(mmapData2)) {
+		return nil, fmt.Errorf("segment data out of bounds after concurrent write")
+	}
+
+	//now safe to copy using the new map
+	dataCopy := make([]byte, dataLen)
+	copy(dataCopy, mmapData2[start:end])
+
+	buf := bytes.NewReader(dataCopy)
 
 	for buf.Len() > 0 {
 		var kLen, vLen uint32
@@ -129,6 +209,11 @@ func (r *Reader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {
 		}
 		if err := binary.Read(buf, binary.BigEndian, &tomb); err != nil {
 			break
+		}
+
+		//validate lengths in case of corrupted data
+		if kLen > 1024*1024 || vLen > 10*1024*1024 {
+			return nil, fmt.Errorf("invalid key/value length: kLen=%d, vLen=%d", kLen, vLen)
 		}
 
 		keyBytes := make([]byte, kLen)
