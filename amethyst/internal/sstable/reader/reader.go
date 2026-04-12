@@ -19,11 +19,22 @@ type Reader struct {
 	fileMgr segmentfile.SegmentFileManager
 }
 
+// GlobalReadComparisons tracks total read-path comparisons across all segments,
+// including segments that may later become obsolete due to compaction.
+var GlobalReadComparisons int64
+
 func NewReader(fileMgr segmentfile.SegmentFileManager) *Reader {
 	return &Reader{fileMgr: fileMgr}
 }
 
 func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
+	var localCmps int64
+	defer func() {
+		if localCmps > 0 {
+			atomic.AddInt64(&GlobalReadComparisons, localCmps)
+		}
+	}()
+
 	//validate segment is not obsolete
 	if meta == nil || meta.IsObsolete() {
 		return nil, false
@@ -55,7 +66,6 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 	}
 
 	// Compute absolute start offset
-	var localCmps int64
 	start := meta.Offset + meta.DataStartOffset + idx.Seek(target, &localCmps)
 	end := meta.Offset + meta.SparseIndexOffset
 
@@ -73,8 +83,8 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 	data := mmapData[start:end]
 	buf := bytes.NewReader(data)
 
-	 for buf.Len() > 0 {
-	 	localCmps++ // Track each linear scan comparison
+	for buf.Len() > 0 {
+		localCmps++ // Track each linear scan comparison
 		var kLen uint32
 		var vLen uint32
 		var tomb byte
@@ -108,23 +118,23 @@ func (r *Reader) Get(meta *common.SegmentMeta, target string) ([]byte, bool) {
 			}
 		}
 
- 		if key == target {
- 			atomic.AddInt64(&meta.TotalComparisons, localCmps) // Commit work to metadata
- 			if tomb == 1 {
- 				return nil, false
- 			}
- 			return valBytes, true
- 		}
+		if key == target {
+			atomic.AddInt64(&meta.TotalComparisons, localCmps) // Commit work to metadata
+			if tomb == 1 {
+				return nil, false
+			}
+			return valBytes, true
+		}
 
- 		// Sorted order invariant: stop early
- 		if key > target {
- 			atomic.AddInt64(&meta.TotalComparisons, localCmps)
- 			return nil, false
- 		}
- 	}
+		// Sorted order invariant: stop early
+		if key > target {
+			atomic.AddInt64(&meta.TotalComparisons, localCmps)
+			return nil, false
+		}
+	}
 
- 	atomic.AddInt64(&meta.TotalComparisons, localCmps)
- 	return nil, false
+	atomic.AddInt64(&meta.TotalComparisons, localCmps)
+	return nil, false
 }
 
 func (r *Reader) Scan(meta *common.SegmentMeta) (map[string][]byte, error) {

@@ -1,13 +1,16 @@
 package writer
+
 import (
-	"sync/atomic"
 	"amethyst/internal/common"
 	"amethyst/internal/segmentfile"
 	"amethyst/internal/sparseindex"
 	"encoding/binary"
+	"sync/atomic"
 	"time"
+
 	"github.com/google/uuid"
 )
+
 // Global counters for physical and compaction writes
 var GlobalPhysicalWriteBytes int64
 var GlobalCompactionWriteBytes int64

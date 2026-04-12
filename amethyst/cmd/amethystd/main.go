@@ -23,37 +23,36 @@ import (
 )
 
 var (
-	workloadFlag  = flag.String("workload", "shift", "Workload type")
-	numKeysFlag   = flag.Int("keys", 1000000, "Number of keys")
-	valueSizeFlag = flag.Int("value-size", 256, "Value size in bytes")
-	engineFlag    = flag.String("engine", "adaptive", "Engine name for output")
-
-
+	workloadFlag   = flag.String("workload", "shift", "Workload type")
+	numKeysFlag    = flag.Int("keys", 1000000, "Number of keys")
+	valueSizeFlag  = flag.Int("value-size", 256, "Value size in bytes")
+	memEntriesFlag = flag.Int("memtable-entries", 4*1024, "Memtable flush threshold (entries)")
+	engineFlag     = flag.String("engine", "adaptive", "Engine name for output")
 )
 
 // Results structure for JSON output
 type Results struct {
-	Engine             string        `json:"engine"`
-	Workload           string        `json:"workload"`
-	NumKeys            int           `json:"num_keys"`
-	ValueSize          int           `json:"value_size"`
-	WriteAmplification float64       `json:"write_amplification"`
-	ReadAmplification  float64       `json:"read_amplification"`
-	SpaceAmplification float64       `json:"space_amplification"`
-	CompactionCount    int           `json:"compaction_count"`
-	TotalDurationSec   float64       `json:"total_duration_sec"`
-	LogicalBytes       int64         `json:"logical_bytes"`
-	PhysicalBytes      int64         `json:"physical_bytes"`
-	TotalReads         int64         `json:"total_reads"`
-	SegmentScans       int64         `json:"segment_scans"`
-	LiveDataBytes      int64         `json:"live_data_bytes"`
-	TotalDiskBytes     int64         `json:"total_disk_bytes"`
-	Phases             []PhaseResult `json:"phases,omitempty"`
-	TotalComparisons    int64   `json:"total_comparisons"`
-	AvgComparisonsPerRead float64 `json:"avg_comparisons_per_read"`
-	LogicalWriteBytes   int64 `json:"logical_write_bytes"`  // User Puts
-	PhysicalWriteBytes  int64 `json:"physical_write_bytes"` // SSTable Appends
-	CompactionWriteBytes int64 `json:"compaction_write_bytes"` // Background churn
+	Engine                string        `json:"engine"`
+	Workload              string        `json:"workload"`
+	NumKeys               int           `json:"num_keys"`
+	ValueSize             int           `json:"value_size"`
+	WriteAmplification    float64       `json:"write_amplification"`
+	ReadAmplification     float64       `json:"read_amplification"`
+	SpaceAmplification    float64       `json:"space_amplification"`
+	CompactionCount       int           `json:"compaction_count"`
+	TotalDurationSec      float64       `json:"total_duration_sec"`
+	LogicalBytes          int64         `json:"logical_bytes"`
+	PhysicalBytes         int64         `json:"physical_bytes"`
+	TotalReads            int64         `json:"total_reads"`
+	SegmentScans          int64         `json:"segment_scans"`
+	LiveDataBytes         int64         `json:"live_data_bytes"`
+	TotalDiskBytes        int64         `json:"total_disk_bytes"`
+	Phases                []PhaseResult `json:"phases,omitempty"`
+	TotalComparisons      int64         `json:"total_comparisons"`
+	AvgComparisonsPerRead float64       `json:"avg_comparisons_per_read"`
+	LogicalWriteBytes     int64         `json:"logical_write_bytes"`    // User Puts
+	PhysicalWriteBytes    int64         `json:"physical_write_bytes"`   // SSTable Appends
+	CompactionWriteBytes  int64         `json:"compaction_write_bytes"` // Background churn
 }
 
 type PhaseResult struct {
@@ -95,7 +94,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: --value-size must be > 0\n")
 		os.Exit(1)
 	}
-
+	if *memEntriesFlag <= 0 {
+		fmt.Fprintf(os.Stderr, "Error: --memtable-entries must be > 0\n")
+		os.Exit(1)
+	}
 
 	// Clean slate
 	os.Remove("wal.log")
@@ -108,6 +110,7 @@ func main() {
 	fmt.Printf("Workload: %s\n", *workloadFlag)
 	fmt.Printf("Keys:     %d\n", *numKeysFlag)
 	fmt.Printf("Value:    %d bytes\n", *valueSizeFlag)
+	fmt.Printf("Memtable entries: %d\n", *memEntriesFlag)
 	fmt.Println()
 
 	// Initialize components
@@ -116,7 +119,7 @@ func main() {
 		panic(err)
 	}
 
-	mem := memtable.NewMemtable(4 * 1024)
+	mem := memtable.NewMemtable(*memEntriesFlag)
 	meta := metadata.NewTracker()
 
 	fileMgr, err := segmentfile.NewSegmentFileManager("sstable.data")
@@ -298,20 +301,7 @@ func main() {
 	}
 
 	// --- I/O & CPU Aggregation ---
-	var aggregatedComparisons int64
-	var totalPhysicalWrite int64
-	var totalCompactionWrite int64
-
-	allFinalSegs := meta.GetAllSegments()
-	for _, seg := range allFinalSegs {
-		aggregatedComparisons += atomic.LoadInt64(&seg.TotalComparisons)
-		// Categorize Physical I/O based on Level
-		if seg.Level == 0 {
-			totalPhysicalWrite += seg.Length // Flush I/O
-		} else {
-			totalCompactionWrite += seg.Length // Compaction I/O
-		}
-	}
+	aggregatedComparisons := atomic.LoadInt64(&reader.GlobalReadComparisons)
 
 	avgCmps := 0.0
 	if totalReads > 0 {
@@ -320,27 +310,27 @@ func main() {
 
 	// Create results
 	results := Results{
-		Engine:             *engineFlag,
-		Workload:           *workloadFlag,
-		NumKeys:            *numKeysFlag,
-		ValueSize:          *valueSizeFlag,
-		WriteAmplification: wa,
-		ReadAmplification:  ra,
-		SpaceAmplification: sa,
-		CompactionCount:    int(compactionCount),
-		TotalDurationSec:   totalDuration.Seconds(),
-		LogicalBytes:       logicalBytes,
-		PhysicalBytes:      physicalBytes,
-		TotalReads:         totalReads,
-		SegmentScans:       totalSegmentScans,
-		LiveDataBytes:      logicalDataSize,
-		TotalDiskBytes:     physicalDiskSize,
-		Phases:             phases,
-		TotalComparisons:   aggregatedComparisons,
+		Engine:                *engineFlag,
+		Workload:              *workloadFlag,
+		NumKeys:               *numKeysFlag,
+		ValueSize:             *valueSizeFlag,
+		WriteAmplification:    wa,
+		ReadAmplification:     ra,
+		SpaceAmplification:    sa,
+		CompactionCount:       int(compactionCount),
+		TotalDurationSec:      totalDuration.Seconds(),
+		LogicalBytes:          logicalBytes,
+		PhysicalBytes:         physicalBytes,
+		TotalReads:            totalReads,
+		SegmentScans:          totalSegmentScans,
+		LiveDataBytes:         logicalDataSize,
+		TotalDiskBytes:        physicalDiskSize,
+		Phases:                phases,
+		TotalComparisons:      aggregatedComparisons,
 		AvgComparisonsPerRead: avgCmps,
-		LogicalWriteBytes: logicalWriteBytes,
-        PhysicalWriteBytes:   atomic.LoadInt64(&writer.GlobalPhysicalWriteBytes),
-        CompactionWriteBytes: atomic.LoadInt64(&writer.GlobalCompactionWriteBytes),
+		LogicalWriteBytes:     logicalWriteBytes,
+		PhysicalWriteBytes:    atomic.LoadInt64(&writer.GlobalPhysicalWriteBytes),
+		CompactionWriteBytes:  atomic.LoadInt64(&writer.GlobalCompactionWriteBytes),
 	}
 
 	// Print summary
@@ -456,7 +446,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -566,7 +556,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -684,7 +674,7 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		atomic.AddInt64(physicalBytes, seg.Length)
 		meta.RegisterSegment(seg)
 	}
@@ -730,7 +720,7 @@ func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
-			seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
+		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
 		meta.RegisterSegment(seg)
 	}
 
