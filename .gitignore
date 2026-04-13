@@ -33,3 +33,5 @@ go.work.sum
 results_*.json
 sstable.data
 wal.log
+
+leveldb_data

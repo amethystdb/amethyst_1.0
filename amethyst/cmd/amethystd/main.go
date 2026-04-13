@@ -19,7 +19,11 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"path/filepath" 
 	"time"
+
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
 var (
@@ -203,45 +207,50 @@ func main() {
 	// Track logical write bytes
 	var logicalWriteBytes int64 = 0
 	// Run workload
-	switch *workloadFlag {
-	case "shift":
-		phases = runShift(w, mem, meta, sstWriter, sstReader, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
+	// If the user passes --engine=leveldb, completely bypass Amethyst!
+	if *engineFlag == "leveldb" && *workloadFlag == "shift" {
+		phases = runLevelDBShift(*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes)
+	} else {
+		switch *workloadFlag {
+		case "shift":
+			phases = runShift(w, mem, meta, sstWriter, sstReader, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
+				&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	case "pure-write":
-		runPureWrite(w, mem, meta, sstWriter, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes, &compactionCount,
-			liveKeys, &liveKeysMutex, &logicalWriteBytes)
+		case "pure-write":
+			runPureWrite(w, mem, meta, sstWriter, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes, &compactionCount,
+				liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	case "pure-read":
-		runPureRead(w, mem, meta, sstWriter, sstReader,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes,
-			&totalReads, &totalSegmentScans, liveKeys, &liveKeysMutex)
+		case "pure-read":
+			runPureRead(w, mem, meta, sstWriter, sstReader,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes,
+				&totalReads, &totalSegmentScans, liveKeys, &liveKeysMutex)
 
-	case "mixed":
-		runMixed(w, mem, meta, sstWriter, sstReader, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
+		case "mixed":
+			runMixed(w, mem, meta, sstWriter, sstReader, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
+				&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	case "read-heavy":
-		runReadHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
+		case "read-heavy":
+			runReadHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
+				&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	case "write-heavy":
-		runWriteHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
+		case "write-heavy":
+			runWriteHeavy(w, mem, meta, sstWriter, sstReader, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
+				&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	case "zipfian":
-		runZipfian(w, mem, meta, sstWriter, sstReader, director, executor,
-			*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
-			&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
+		case "zipfian":
+			runZipfian(w, mem, meta, sstWriter, sstReader, director, executor,
+				*numKeysFlag, *valueSizeFlag, &logicalBytes, &physicalBytes, &userBytes,
+				&totalReads, &totalSegmentScans, &compactionCount, liveKeys, &liveKeysMutex, &logicalWriteBytes)
 
-	default:
-		fmt.Printf("Unknown workload: %s\n", *workloadFlag)
-		os.Exit(1)
+		default:
+			fmt.Printf("Unknown workload: %s\n", *workloadFlag)
+			os.Exit(1)
+		}
 	}
 
 	// Stop background compaction
@@ -682,6 +691,132 @@ func runPureWrite(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	// Let background compaction handle it
 	time.Sleep(10 * time.Second)
 }
+
+	//helper to calculate LevelDB's physical size on disk
+	func getDirSize(path string) int64 {
+		var size int64
+		filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				size += info.Size()
+			}
+			return nil
+		})
+		return size
+	}
+
+	func runLevelDBShift(numKeys, valueSize int, logicalBytes, physicalBytes, userBytes *int64) []PhaseResult {
+		dbPath := "leveldb_data"
+		os.RemoveAll(dbPath) // Clean slate
+
+		// THE "CRIPPLED" BASELINE: Disable features to match Amethyst
+		options := &opt.Options{
+			Filter:      nil,               // Disable Bloom filters
+			Compression: opt.NoCompression, // Disable Snappy compression
+		}
+
+		db, err := leveldb.OpenFile(dbPath, options)
+		if err != nil {
+			panic(err)
+		}
+		defer db.Close()
+
+		var phases []PhaseResult
+		writeOpts := &opt.WriteOptions{Sync: false} // Matches Amethyst's async flushing
+		
+		// === PHASE 1: Write ===
+		fmt.Println("=== LEVELDB PHASE 1: Write ===")
+		phase1Start := time.Now()
+		
+		for i := 0; i < numKeys; i++ {
+			key := []byte(fmt.Sprintf("key-%010d", i))
+			val := make([]byte, valueSize)
+			rand.Read(val)
+			
+			db.Put(key, val, writeOpts)
+			*logicalBytes += int64(len(key) + valueSize)
+			*userBytes += int64(len(key) + len(val))
+		}
+
+		// Overwrites to match Phase 1 logic
+		for i := 0; i < numKeys/2; i++ {
+			key := []byte(fmt.Sprintf("key-%010d", rand.Intn(numKeys)))
+			val := make([]byte, valueSize)
+			rand.Read(val)
+			
+			db.Put(key, val, writeOpts)
+			*logicalBytes += int64(len(key) + valueSize)
+			*userBytes += int64(len(key) + len(val))
+		}
+		
+		*physicalBytes = getDirSize(dbPath)
+		phases = append(phases, PhaseResult{
+			Name:     "write",
+			Duration: time.Since(phase1Start).Seconds(),
+			WA:       float64(*physicalBytes) / float64(*logicalBytes),
+		})
+
+		// === PHASE 2: Read ===
+		fmt.Println("\n=== LEVELDB PHASE 2: Read ===")
+		time.Sleep(2 * time.Second)
+		phase2Start := time.Now()
+		
+		for i := 0; i < numKeys; i++ {
+			key := []byte(fmt.Sprintf("key-%010d", rand.Intn((numKeys*9)/10)))
+			db.Get(key, nil)
+		}
+		
+		phases = append(phases, PhaseResult{
+			Name:     "read",
+			Duration: time.Since(phase2Start).Seconds(),
+			WA:       float64(*physicalBytes) / float64(*logicalBytes),
+		})
+
+		// === PHASE 3: Write (50%) ===
+		fmt.Println("\n=== LEVELDB PHASE 3: Write (50%) ===")
+		time.Sleep(10 * time.Second) // Let LevelDB run background compactions
+		phase3Start := time.Now()
+		
+		for i := 0; i < numKeys/2; i++ {
+			key := []byte(fmt.Sprintf("key-%010d", rand.Intn(numKeys)))
+			val := make([]byte, valueSize)
+			rand.Read(val)
+			
+			db.Put(key, val, writeOpts)
+			*logicalBytes += int64(len(key) + valueSize)
+			*userBytes += int64(len(key) + len(val))
+		}
+		
+		*physicalBytes = getDirSize(dbPath)
+		phases = append(phases, PhaseResult{
+			Name:     "write2",
+			Duration: time.Since(phase3Start).Seconds(),
+			WA:       float64(*physicalBytes) / float64(*logicalBytes),
+		})
+
+		// === PHASE 4: Read After Overwrites ===
+		fmt.Println("\n=== LEVELDB PHASE 4: Read After Overwrites ===")
+		time.Sleep(10 * time.Second)
+		phase4Start := time.Now()
+		
+		for i := 0; i < numKeys*3; i++ {
+			key := []byte(fmt.Sprintf("key-%010d", rand.Intn(numKeys)))
+			db.Get(key, nil)
+		}
+		
+		phases = append(phases, PhaseResult{
+			Name:     "read_after_overwrites",
+			Duration: time.Since(phase4Start).Seconds(),
+			WA:       float64(*physicalBytes) / float64(*logicalBytes),
+		})
+
+		// Ask LevelDB for its internal benchmark stats
+		stats, err := db.GetProperty("leveldb.stats")
+		if err == nil {
+			fmt.Println("\n=== LEVELDB INTERNAL STATS ===")
+			fmt.Println(stats)
+		}
+		return phases
+	}
 
 func runPureRead(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	sstWriter writer.SSTableWriter, sstReader reader.SSTableReader,
