@@ -16,13 +16,13 @@ type SegmentFileManager interface {
 }
 
 type localFileManager struct {
-	file         *os.File
-	path         string
-	mu           sync.RWMutex
-	mmapData     []byte
-	mmappedSize  int64  // Track current mmap size
-	isMMapped    bool
-	activeReads  int32  // Reference count for active readers
+	file        *os.File
+	path        string
+	mu          sync.RWMutex
+	mmapData    []byte
+	mmappedSize int64 //current mmap size
+	isMMapped   bool
+	activeReads int32 // Reference count for active readers
 }
 
 func NewSegmentFileManager(path string) (SegmentFileManager, error) {
@@ -40,8 +40,8 @@ func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// DON'T unmap on every write - let it stay mapped
-	// The OS will make writes visible through MAP_SHARED
+	//No unmap on every write,stay mapped
+	//os make writes visible through MAP_SHARED
 
 	stat, err := s.file.Stat()
 	if err != nil {
@@ -55,7 +55,7 @@ func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 		return 0, 0, err
 	}
 
-	// Force sync to ensure data is on disk
+	//force sync to ensure data is on disk
 	if err := s.file.Sync(); err != nil {
 		return 0, 0, err
 	}
@@ -66,7 +66,7 @@ func (s *localFileManager) Append(data []byte) (int64, int64, error) {
 func (s *localFileManager) ReadAt(offset int64, length int64) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	buf := make([]byte, length)
 	_, err := s.file.ReadAt(buf, offset)
 	if err != nil {
@@ -88,36 +88,36 @@ func (s *localFileManager) GetMmapData() ([]byte, error) {
 			s.mu.RUnlock()
 			return nil, err
 		}
-		
+
 		// If file didn't grow much, reuse existing mmap
 		if stat.Size() <= s.mmappedSize {
 			defer s.mu.RUnlock()
 			return s.mmapData, nil
 		}
 		s.mu.RUnlock()
-		
-		// Need to remap - upgrade to write lock
+
+		// Need to remap, upgrade to write lock
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		
+
 		// Double-check after acquiring write lock
 		if stat.Size() <= s.mmappedSize {
 			return s.mmapData, nil
 		}
-		
+
 		// Unmap old mapping
 		if s.mmapData != nil {
 			syscall.Munmap(s.mmapData)
 		}
-		
+
 		// Remap with new size
-		data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()), 
+		data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()),
 			syscall.PROT_READ, syscall.MAP_SHARED)
 		if err != nil {
 			s.isMMapped = false
 			return nil, err
 		}
-		
+
 		s.mmapData = data
 		s.mmappedSize = stat.Size()
 		s.isMMapped = true
@@ -143,12 +143,12 @@ func (s *localFileManager) GetMmapData() ([]byte, error) {
 		return []byte{}, nil
 	}
 
-	data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()), 
+	data, err := syscall.Mmap(int(s.file.Fd()), 0, int(stat.Size()),
 		syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	s.mmapData = data
 	s.mmappedSize = stat.Size()
 	s.isMMapped = true

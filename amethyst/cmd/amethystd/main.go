@@ -131,7 +131,7 @@ func main() {
 	sstWriter := writer.NewWriter(fileMgr, indexBuilder)
 	sstReader := reader.NewReader(fileMgr)
 
-	// FIXED: Create FSMController directly
+	//create FSMController directly
 	fsm := adaptive.NewFSMController()
 	director := compaction.NewDirector(meta, fsm)
 	executor := compaction.NewExecutor(meta, sstReader, sstWriter)
@@ -161,14 +161,14 @@ func main() {
 			case <-ticker.C:
 				fmt.Printf("  [DEBUG] Checking for compaction...\n")
 
-				// CRITICAL: Lock metadata before planning
+				// Lock metadata before planning
 				plan := director.MaybePlan()
 
 				if plan != nil {
 					fmt.Printf("  [BG Compaction] %d segs → Strategy=%v, Reason=%s\n",
 						len(plan.Inputs), plan.OutputStrategy, plan.Reason)
 
-					// CRITICAL: Validate inputs before execution
+					//validate inputs before execution
 					validInputs := true
 					for _, seg := range plan.Inputs {
 						if seg == nil || seg.IsObsolete() {
@@ -261,7 +261,7 @@ func main() {
 		ra = float64(totalSegmentScans) / float64(totalReads)
 	}
 
-	// Space amplification - GET ACTUAL FILE SIZE
+	// Space amplification actual file size
 	liveKeysMutex.RLock()
 	logicalDataSize := int64(0)
 	for key, valSize := range liveKeys {
@@ -269,7 +269,7 @@ func main() {
 	}
 	liveKeysMutex.RUnlock()
 
-	// Get actual file size on disk
+	//actual file size on disk
 	fileInfo, err := os.Stat("sstable.data")
 	physicalDiskSize := int64(0)
 	if err == nil {
@@ -300,7 +300,7 @@ func main() {
 		sa = 0.0
 	}
 
-	// --- I/O & CPU Aggregation ---
+	//I/O & CPU Aggregation
 	aggregatedComparisons := atomic.LoadInt64(&reader.GlobalReadComparisons)
 
 	avgCmps := 0.0
@@ -380,11 +380,11 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 
 	var phases []PhaseResult
 
-	// PHASE 1: Write (multiple rounds to create overlapping segments)
+	//Write (multiple rounds to create overlapping segments)
 	fmt.Println("=== PHASE 1: Write ===")
 	phase1Start := time.Now()
 
-	// Round 1: Sequential write to populate all keys
+	//Sequential write to populate all keys
 	for i := 0; i < numKeys; i++ {
 		key := fmt.Sprintf("key-%010d", i)
 		val := make([]byte, valueSize)
@@ -414,8 +414,8 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 		}
 	}
 
-	// Round 2: Random overwrites to create overlapping segments
-	// This simulates a real workload where updates hit existing keys
+	//Random overwrites to create overlapping segments
+	//simulates a real workload where updates hit existing keys
 	overwriteCount := numKeys / 2
 	for i := 0; i < overwriteCount; i++ {
 		key := fmt.Sprintf("key-%010d", rand.Intn(numKeys))
@@ -516,7 +516,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	fmt.Printf("  Current RA: %.2f\n", phase2RA)
 	fmt.Printf("  Duration: %v\n", phase2Duration)
 
-	// Let background compaction handle it
+	//let background compaction handle it
 	time.Sleep(10 * time.Second)
 
 	// PHASE 3: Write again
@@ -553,7 +553,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	}
 	fmt.Println()
 
-	// Final flush
+	//final flush
 	if mem.ShouldFlush() {
 		data := mem.Flush()
 		seg, _ := sstWriter.WriteSegment(data, common.TIERED, 0)
@@ -567,7 +567,7 @@ func runShift(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 	fmt.Printf("  Segments: %d\n", len(meta.GetAllSegments()))
 	fmt.Printf("  Duration: %v\n", phase3Duration)
 
-	// Let background compaction work on the new overlapping segments
+	//let background compaction work on the new overlapping segments
 	time.Sleep(10 * time.Second)
 
 	// PHASE 4: Read again (after overwrites created overlapping segments)
@@ -1161,6 +1161,6 @@ func runZipfian(w wal.WAL, mem memtable.Memtable, meta metadata.Tracker,
 			topHotKeyAccesses*100/numReads)
 	}
 
-	// Let background compaction handle it
+	//let background compaction handle it
 	time.Sleep(10 * time.Second)
 }

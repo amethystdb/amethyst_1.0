@@ -31,7 +31,7 @@ func NewMemtable(maxEntries int) Memtable {
 func (m *memtable) Put(key string, value []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Binary search to find the correct insertion point
+	//binary search to find the correct insertion point
 	i := sort.Search(len(m.data), func(i int) bool { return m.data[i].Key >= key })
 	if i < len(m.data) && m.data[i].Key == key {
 		m.data[i] = common.KVEntry{Key: key, Value: value, Tombstone: false}
@@ -82,7 +82,7 @@ func (m *memtable) Flush() []common.KVEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If there's no data, return nil so her main.go skips the write
+	// If there's no data, return nil so main.go skips the write
 	if len(m.data) == 0 {
 		return nil //
 	}

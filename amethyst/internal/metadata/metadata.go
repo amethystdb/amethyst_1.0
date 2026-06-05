@@ -18,7 +18,7 @@ type Tracker interface {
 }
 
 type tracker struct {
-	mu       sync.RWMutex // Use RWMutex for better read performance
+	mu       sync.RWMutex //RWMutex for better read performance
 	segments map[string]*common.SegmentMeta
 	ordered  []*common.SegmentMeta
 }
@@ -40,22 +40,21 @@ func (t *tracker) RegisterSegment(meta *common.SegmentMeta) {
 		if other.IsObsolete() {
 			continue
 		}
-		// Logic: Two segments overlap if they don't sit entirely to the left or right of each other
-		// This is the core metric for your "Adaptive" transition proof
+		//two segments overlap if they don't sit entirely to the left or right of each other
+		//core metric of Adaptive transition proof
 		if !(meta.MaxKey < other.MinKey || meta.MinKey > other.MaxKey) {
 			overlaps++
 		}
 	}
 
-	// This allows the FSM to detect "Tiered" behavior (high overlap)
-	// and transition to "Leveled" (zero overlap)
+	//FSM to detects "Tiered" behavior (high overlap) and transition to "Leveled" (zero overlap)
 	meta.OverlapCount = overlaps
 
 	t.segments[meta.ID] = meta
 	t.ordered = append([]*common.SegmentMeta{meta}, t.ordered...)
 }
 
-// NEW METHOD: This fixes the "MissingFieldOrMethod" error in your screenshot
+// this fixes the "MissingFieldOrMethod" error in your screenshot
 func (t *tracker) GetOverlappingSegments(target *common.SegmentMeta) []*common.SegmentMeta {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -65,7 +64,7 @@ func (t *tracker) GetOverlappingSegments(target *common.SegmentMeta) []*common.S
 		if seg.ID == target.ID || seg.IsObsolete() {
 			continue
 		}
-		// Logic: If ranges touch, they overlap
+		//if ranges touch then overlap
 		if !(target.MaxKey < seg.MinKey || target.MinKey > seg.MaxKey) {
 			overlaps = append(overlaps, seg)
 		}
@@ -85,13 +84,13 @@ func (t *tracker) GetSegmentsForKey(key string) []*common.SegmentMeta {
 			result = append(result, seg)
 		}
 	}
-    // Sort by Level (ascending), then CreatedAt (descending)
-    sort.Slice(result, func(i, j int) bool {
-        if result[i].Level != result[j].Level {
-            return result[i].Level < result[j].Level
-        }
-        return result[i].CreatedAt > result[j].CreatedAt
-    })
+	// Sort by Level (ascending), then CreatedAt (descending)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Level != result[j].Level {
+			return result[i].Level < result[j].Level
+		}
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
 	return result
 }
 
@@ -106,13 +105,12 @@ func (t *tracker) GetAllSegments() []*common.SegmentMeta {
 		}
 	}
 
-    // Sort by Level (ascending), then CreatedAt (descending)
-    sort.Slice(result, func(i, j int) bool {
-        if result[i].Level != result[j].Level {
-            return result[i].Level < result[j].Level
-        }
-        return result[i].CreatedAt > result[j].CreatedAt
-    })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Level != result[j].Level {
+			return result[i].Level < result[j].Level
+		}
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
 
 	return result
 }
@@ -126,11 +124,11 @@ func (t *tracker) MarkObsolete(id string) {
 }
 
 func (t *tracker) UpdateStats(id string, reads int64, writes int64) {
-	t.mu.RLock() // Only need read access to find the segment
+	t.mu.RLock() //to only need read access to find the segment
 	seg, ok := t.segments[id]
 	t.mu.RUnlock()
 	if ok {
-		seg.AddReads(reads) // These use atomics internally
+		seg.AddReads(reads) //use atomics internally
 		seg.AddWrites(writes)
 	}
 }

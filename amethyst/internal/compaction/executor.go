@@ -33,7 +33,7 @@ func NewExecutor(
 }
 
 func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
-	//validate ALL input segments BEFORE starting
+	//validate all input segments b4 starting
 	for i, seg := range plan.Inputs {
 		if seg == nil {
 			return nil, fmt.Errorf("input segment %d is nil", i)
@@ -60,9 +60,9 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 
 	merged := make(map[string][]byte)
 
-	// Scan all input segments. Higher index (newer) will overwrite older values.
+	//scan all input segments. Higher index (newer) will overwrite older values
 	for _, seg := range plan.Inputs {
-		//double-check segment is still valid before scanning
+		//double check segment is still valid before scanning
 		if seg.IsObsolete() || !seg.InCompaction.Load() {
 			//skip if it was obsoleted by another goroutine
 			log.Printf("  [WARN] Skipping segment %s (obsolete=%v, inCompaction=%v)", seg.ID, seg.IsObsolete(), seg.InCompaction.Load())
@@ -71,7 +71,7 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 
 		data, err := e.reader.Scan(seg)
 		if err != nil {
-			//log but continue - don't fail entire compaction
+			//log but continue,don't fail entire compaction
 			log.Printf("  [WARN] Failed to scan segment %s: %v", seg.ID, err)
 			continue
 		}
@@ -81,7 +81,7 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 			}
 		}
 
-		// Track that this segment is being rewritten
+		//track that this segment is being rewritten
 		e.meta.UpdateStats(seg.ID, 0, 1)
 	}
 
@@ -97,7 +97,7 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 		finalEntries = append(finalEntries, common.KVEntry{
 			Key:       k,
 			Value:     val,
-			Tombstone: val == nil, // nil from Scan correctly becomes a Tombstone here
+			Tombstone: val == nil, // nil from Scan correctly becomes a Tombstone
 		})
 	}
 
@@ -110,14 +110,14 @@ func (e *executor) Execute(plan *Plan) (*common.SegmentMeta, error) {
 		e.meta.RegisterSegment(newSeg)
 	}
 
-	// Mark ALL inputs obsolete and clear InCompaction flag
+	// Mark all inputs obsolete and clear InCompaction flag
 	for _, seg := range plan.Inputs {
 		seg.MarkObsolete()
 		//removed seg.InCompaction.Store(false)
 		e.meta.MarkObsolete(seg.ID)
 	}
 
-	// Improved logging for Suchi to see the merge happening
+	//logging for Suchi to see the merge happening
 	log.Printf("ADAPTIVE MERGE: %d segs merged into 1 @ Level %d (Strategy: %v, Reason: %s)",
 		len(plan.Inputs), newSeg.Level, plan.OutputStrategy, plan.Reason)
 

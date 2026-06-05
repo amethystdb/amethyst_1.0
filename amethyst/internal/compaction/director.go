@@ -10,7 +10,7 @@ type Plan struct {
 	Inputs         []*common.SegmentMeta
 	OutputStrategy common.CompactionType
 	Reason         string
-	TargetLevel    int   // <-- ADDED
+	TargetLevel    int
 }
 
 type Director interface {
@@ -32,9 +32,9 @@ func NewDirector(meta metadata.Tracker, fsm adaptive.Controller) Director {
 	}
 }
 
-// UpdateMetrics is kept for interface compatibility but no longer drives FSM decisions
+// kept for interface compatibility, no longer drives FSM decisions
 func (d *director) UpdateMetrics(readAmp, writeAmp float64) {
-	// No-op: FSM now uses per-segment ReadCount/WriteCount
+	//FSM now uses per-segment ReadCount/WriteCount
 }
 
 func (d *director) MaybePlan() *Plan {
@@ -44,7 +44,7 @@ func (d *director) MaybePlan() *Plan {
 		return nil
 	}
 
-	// Check each segment: ask FSM if it should be rewritten
+	//check each segment, ask FSM if it should be rewritten
 	if d.fsm != nil {
 		for _, seg := range segments {
 			if seg.IsObsolete() {
@@ -61,7 +61,7 @@ func (d *director) MaybePlan() *Plan {
 
 				if newStrategy == common.LEVELED {
 					inputs = d.collectLimitedOverlaps(seg, 50)
-					targetLevel = seg.Level + 1 // Push down on Leveled transition
+					targetLevel = seg.Level + 1 //push down on Leveled transition
 				} else {
 					inputs = []*common.SegmentMeta{seg}
 				}
@@ -80,7 +80,7 @@ func (d *director) MaybePlan() *Plan {
 		if plan := d.planTieredCompaction(segments); plan != nil {
 			return plan
 		}
-		// Also try leveled if tiered finds nothing (e.g. many overlapping segments)
+		//try leveled if tiered finds nothing (e.g. many overlapping segments)
 		return d.planLeveledCompaction(segments)
 	case common.LEVELED:
 		return d.planLeveledCompaction(segments)
@@ -102,10 +102,10 @@ func (d *director) planTieredCompaction(segments []*common.SegmentMeta) *Plan {
 			if candidate.IsObsolete() {
 				continue
 			}
-            // Only merge Tiered runs if they are on the same level!
-            if seg.Level != candidate.Level {
-                continue
-            }
+			// Only merge Tiered runs if they are on the same level!
+			if seg.Level != candidate.Level {
+				continue
+			}
 
 			sizeRatio := float64(seg.Length) / float64(candidate.Length)
 			if sizeRatio < 2.0 && sizeRatio > 0.5 {
@@ -150,29 +150,29 @@ func (d *director) planLeveledCompaction(segments []*common.SegmentMeta) *Plan {
 
 // collectLimitedOverlaps prevents massive compactions by limiting segment count
 func (d *director) collectLimitedOverlaps(target *common.SegmentMeta, maxSegments int) []*common.SegmentMeta {
-		// Clear the backlog in one shot with a large merge
-		if maxSegments > 50 {
-			maxSegments = 50
-		}
+	// Clear the backlog in one shot with a large merge
+	if maxSegments > 50 {
+		maxSegments = 50
+	}
 
-		inputs := []*common.SegmentMeta{target}
-		seen := make(map[string]bool)
-		seen[target.ID] = true
+	inputs := []*common.SegmentMeta{target}
+	seen := make(map[string]bool)
+	seen[target.ID] = true
 
-		overlaps := d.meta.GetOverlappingSegments(target)
+	overlaps := d.meta.GetOverlappingSegments(target)
 
-		for _, overlap := range overlaps {
-			if !seen[overlap.ID] && !overlap.IsObsolete() {
-				inputs = append(inputs, overlap)
-				seen[overlap.ID] = true
+	for _, overlap := range overlaps {
+		if !seen[overlap.ID] && !overlap.IsObsolete() {
+			inputs = append(inputs, overlap)
+			seen[overlap.ID] = true
 
-				if len(inputs) >= maxSegments {
-					break
-				}
+			if len(inputs) >= maxSegments {
+				break
 			}
 		}
+	}
 
-		return inputs
+	return inputs
 }
 
 // GetCurrentPolicy returns the active compaction strategy

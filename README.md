@@ -62,6 +62,15 @@ go build ./...
 go run ./cmd/amethystd [flags]
 ```
 
+# Specifically for our results in shift workload we used:
+```bash
+Navigate to the workspace directory
+cd cmd/amethystd
+
+# Run the benchmark workload using a specific engine baseline label
+go run main.go --engine=leveldb --workload=shift
+```
+
 #### Flags:
 
 | Flag | Default | Description |
