@@ -118,38 +118,40 @@ func (c *FSMController) updateSegmentHistory(meta *common.SegmentMeta) {
 }
 
 func (c *FSMController) calculateTrend(history []MetricSnapshot, metric string) float64 {
-	if len(history) < 2 {
-		return 0
-	}
+        if len(history) == 0 {
+                return 0
+        }
 
-	mid := len(history) / 2
-	var oldSum, newSum int64
+        alpha := 0.2
 
-	for i := 0; i < mid; i++ {
-		if metric == "read" {
-			oldSum += history[i].ReadCount
-		} else {
-			oldSum += history[i].WriteCount
-		}
-	}
+        var ema float64
 
-	for i := mid; i < len(history); i++ {
-		if metric == "read" {
-			newSum += history[i].ReadCount
-		} else {
-			newSum += history[i].WriteCount
-		}
-	}
+        if metric == "read" {
+                ema = float64(history[0].ReadCount)
+        } else {
+                ema = float64(history[0].WriteCount)
+        }
 
-	oldAvg := float64(oldSum) / float64(mid)
-	newAvg := float64(newSum) / float64(len(history)-mid)
+        var latest float64
+        for i := 1; i < len(history); i++ {
+                var value float64
+                if metric == "read" {
+                        value = float64(history[i].ReadCount)
+                } else {
+                        value = float64(history[i].WriteCount)
+                }
 
-	if oldAvg == 0 {
-		if newAvg > 0 {
-			return 1.0
-		}
-		return 0
-	}
+                ema = alpha*value + (1-alpha)*ema
+                latest = value
+        }
 
-	return (newAvg - oldAvg) / oldAvg
+        if latest == 0 {
+                return 0
+        }
+        trend := (latest - ema) / latest
+        if trend < 0 {
+                return 0
+        }
+        return trend
 }
+
